@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "copytodesk": {
+      "command": "node",
+      "args": [
+        "f:/codeProject/ZJProject/copyToDesk/mvp/mcp-server/index.mjs",
+        "--relay-host",
+        "127.0.0.1",
+        "--relay-port",
+        "19901",
+        "--device-id",
+        "888100200",
+        "--token",
+        "demo123"
+      ]
+    }
+  }
+}

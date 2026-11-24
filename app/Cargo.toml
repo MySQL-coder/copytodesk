@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ctd-protocol",
+    "crates/ctd-core",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+authors = ["CopyToDesk Clean-Room Contributors"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2.0"
+tracing = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
+rand = "0.8"

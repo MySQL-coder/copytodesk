@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CopyToDesk — 跨平台远控工作台</title>
+<style>
+  :root {
+    --bg: #0c1017; --panel: #131924; --panel-2: #192231; --border: #263247;
+    --text: #e6edf3; --muted: #8b9bb4; --accent: #3b82f6; --accent-2: #2563eb;
+    --ok: #22c55e; --warn: #f59e0b; --err: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { height:52px; padding:0 16px; background:var(--panel); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:600; letter-spacing:.2px; }
+  .pill { font-size:11px; padding:3px 8px; border-radius:999px; background:rgba(59,130,246,.15); color:#93c5fd; border:1px solid rgba(59,130,246,.35); }
+  .pill.ok { background:rgba(34,197,94,.14); color:#86efac; border-color:rgba(34,197,94,.35); }
+  .layout { flex:1; display:grid; grid-template-columns: 290px 1fr 300px; min-height:0; }
+  aside { background:var(--panel); border-right:1px solid var(--border); padding:14px; overflow-y:auto; display:flex; flex-direction:column; gap:14px; }
+  aside.right { border-right:none; border-left:1px solid var(--border); }
+  .card { background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .card h3 { margin:0; font-size:13px; color:#cbd5e1; display:flex; justify-content:space-between; align-items:center; }
+  label { font-size:11px; color:var(--muted); display:block; margin-bottom:3px; }
+  input, select, textarea { width:100%; background:#0b0f16; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12.5px; outline:none; }
+  input:focus, textarea:focus { border-color:var(--accent); }
+  button { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:7px 11px; font-size:12.5px; font-weight:500; cursor:pointer; }
+  button:hover { background:var(--accent-2); }
+  button.sec { background:#233046; color:#dbeafe; }
+  button.sec:hover { background:#2d3d59; }
+  button.danger { background:#991b1b; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  main { display:flex; flex-direction:column; min-width:0; min-height:0; background:#070a0f; }
+  .toolbar { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .stage { flex:1; display:flex; align-items:center; justify-content:center; padding:12px; overflow:auto; position:relative; }
+  canvas { max-width:100%; max-height:100%; background:#000; border:1px solid var(--border); border-radius:6px; cursor:crosshair; box-shadow:0 12px 32px rgba(0,0,0,.45); }
+  .hud { position:absolute; top:18px; left:18px; background:rgba(12,16,23,.82); border:1px solid var(--border); padding:5px 10px; border-radius:6px; font-family:Consolas,monospace; font-size:11.5px; color:#93c5fd; pointer-events:none; }
+  .log { font-family:Consolas,monospace; font-size:11px; background:#080b10; border:1px solid var(--border); border-radius:6px; padding:8px; max-height:140px; overflow:auto; white-space:pre-wrap; color:#a7f3d0; }
+  .file-list { max-height:130px; overflow:auto; font-size:12px; display:flex; flex-direction:column; gap:4px; }
+  .file-item { display:flex; justify-content:space-between; padding:4px 6px; background:#0e141f; border-radius:4px; }
+  @media (max-width: 1080px) { .layout { grid-template-columns: 260px 1fr; } aside.right { display:none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span>CopyToDesk</span>
+    <span id="modeBadge" class="pill">检测运行模式...</span>
+    <span class="pill ok">零显卡 Canvas2D 兼容</span>
+  </div>
+  <div style="font-size:12px;color:var(--muted)" id="globalStatus">就绪</div>
+</header>
+
+<div class="layout">
+  <aside>
+    <div class="card">
+      <h3>本机被控端 (Host) <span id="hostBadge" class="pill">未启动</span></h3>
+      <div><label>设备代码 (Device ID)</label><input id="hostDevId" value="888100200" /></div>
+      <div><label>访问令牌 (Token)</label><input id="hostToken" value="demo123" /></div>
+      <div><label>中继地址 (Relay TCP)</label><input id="hostRelay" value="127.0.0.1:19901" /></div>
+      <div class="row">
+        <label style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" id="hostExec" style="width:auto" /> 允许白名单 Exec</label>
+      </div>
+      <div class="row">
+        <button id="btnStartHost">启动被控</button>
+        <button id="btnStopHost" class="danger">停止</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted)" id="hostHint">桌面端 Tauri 模式可直接启停本机 Rust 被控引擎。</div>
+    </div>
+
+    <div class="card">
+      <h3>在线设备发现 <button id="btnRefreshDevs" class="sec" style="padding:3px 8px;font-size:11px">刷新</button></h3>
+      <select id="devSelect"></select>
+      <div><label>中继地址 / 直连地址</label><input id="connRelay" value="127.0.0.1:19901" placeholder="留空则直连" /></div>
+      <div><label>目标设备码</label><input id="connDevId" value="888100200" /></div>
+      <div><label>会话令牌 (Token)</label><input id="connToken" value="demo123" /></div>
+      <div class="row">
+        <button id="btnConnect">连接远控</button>
+        <button id="btnDisconnect" class="sec">断开</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>事件日志</h3>
+      <div id="eventLog" class="log">Waiting for connection...</div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="toolbar">
+      <button id="btnSnap" class="sec">单次截屏</button>
+      <input id="typeInput" placeholder="输入文本发送到远端窗口..." style="max-width:260px" />
+      <button id="btnSendText" class="sec">发送文本</button>
+      <span style="margin-left:auto;font-size:12px;color:var(--muted)" id="resBadge">-- x --</span>
+    </div>
+    <div class="stage">
+      <div id="hud" class="hud">IDLE | Zero-GPU Canvas2D</div>
+      <canvas id="screen" width="1280" height="720"></canvas>
+    </div>
+  </main>
+
+  <aside class="right">
+    <div class="card">
+      <h3>双向剪贴板同步</h3>
+      <textarea id="clipBox" rows="3" placeholder="剪贴板文本内容..."></textarea>
+      <div class="row">
+        <button id="btnClipGet" class="sec">拉取远端</button>
+        <button id="btnClipSet">推送到远端</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>沙箱文件管理 (SHA-256)</h3>
+      <div class="row">
+        <input id="dirPath" placeholder="相对目录 (留空=根目录)" value="" />
+        <button id="btnListDir" class="sec" style="flex:0 0 auto">列表</button>
+      </div>
+      <div id="fileList" class="file-list"><div style="color:var(--muted)">尚未加载</div></div>
+      <div><label>快速上传文本文件到远端</label><input id="upName" value="notes/hello.txt" /></div>
+      <input id="upContent" value="Uploaded from CopyToDesk Unified UI" />
+      <button id="btnUpload">校验并上传</button>
+    </div>
+
+    <div class="card">
+      <h3>白名单受控命令 (Exec)</h3>
+      <input id="execCmd" value="echo Hello_CopyToDesk" />
+      <button id="btnExec" class="sec">执行受控命令</button>
+      <div id="execOut" class="log">等待执行...</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+const isTauri = Boolean(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke);
+const invoke = isTauri ? window.__TAURI__.core.invoke : null;
+
+const $ = (id) => document.getElementById(id);
+const cvs = $('screen');
+const ctx = cvs.getContext('2d');
+let pollTimer = null;
+let connected = false;
+let origW = 1280, origH = 720, frameCount = 0;
+
+function log(msg) {
+  const el = $('eventLog');
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent.slice(0, 1500);
+}
+
+async function initMode() {
+  if (isTauri) {
+    const info = await invoke('get_platform_info');
+    $('modeBadge').textContent = `Tauri 2 Native (${info.os}/${info.arch})`;
+    log(`Running in Tauri Desktop Bundle v${info.version}`);
+  } else {
+    $('modeBadge').textContent = 'Web Viewer 模式 (HTTP/Relay)';
+    $('btnStartHost').disabled = true;
+    $('btnStopHost').disabled = true;
+    $('hostHint').textContent = '当前为浏览器零安装模式；本机被控请运行 CopyToDesk.Host.exe 或使用 Tauri 桌面安装包。';
+    await refreshDevices();
+  }
+}
+
+async function refreshDevices() {
+  if (isTauri) return;
+  try {
+    const r = await fetch('/api/devices');
+    const data = await r.json();
+    const sel = $('devSelect');
+    sel.innerHTML = '';
+    for (const d of data.devices) {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = `${d.deviceId} (${d.name})`;
+      sel.appendChild(opt);
+    }
+    if (data.devices.length > 0) $('connDevId').value = data.devices[0].deviceId;
+    log(`在线设备: ${data.devices.length}`);
+  } catch (e) {
+    log('刷新设备失败: ' + e.message);
+  }
+}
+
+$('devSelect').addEventListener('change', () => {
+  if ($('devSelect').value) $('connDevId').value = $('devSelect').value;
+});
+$('btnRefreshDevs').onclick = refreshDevices;
+
+$('btnStartHost').onclick = async () => {
+  if (!isTauri) return;
+  try {
+    const st = await invoke('start_host', {
+      config: {
+        bindAddr: '127.0.0.1:19800',
+        token: $('hostToken').value,
+        deviceId: $('hostDevId').value,
+        deviceName: 'Tauri-Desktop',
+        relayAddr: $('hostRelay').value || null,
+        fps: 30,
+        jpegQuality: 75,
+        forceSynthetic: false,
+        fileRoot: './shared-files',
+        allowExec: $('hostExec').checked,
+        execAllowlist: ['echo', 'hostname', 'whoami']
+      }
+    });
+    $('hostBadge').textContent = '运行中';
+    $('hostBadge').className = 'pill ok';
+    log(`Host started: ${st.captureBackend} ${st.width}x${st.height}`);
+  } catch (e) { log('启动失败: ' + e); }
+};
+
+$('btnStopHost').onclick = async () => {
+  if (!isTauri) return;
+  await invoke('stop_host');
+  $('hostBadge').textContent = '已停止';
+  $('hostBadge').className = 'pill';
+  log('Host stopped');
+};
+
+async function drawFrame() {
+  const t0 = performance.now();
+  try {
+    let imgSrc = null;
+    if (isTauri) {
+      const res = await invoke('remote_screenshot', { maxWidth: 1280, quality: 72 });
+      origW = res.origW; origH = res.origH;
+      imgSrc = `data:${res.mimeType};base64,${res.dataBase64}`;
+    } else {
+      const r = await fetch('/api/screenshot', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, maxWidth: 1280, quality: 72 })
+      });
+      if (!r.ok) throw new Error(await r.text());
+      origW = Number(r.headers.get('x-orig-w') || 1280);
+      origH = Number(r.headers.get('x-orig-h') || 720);
+      const blob = await r.blob();
+      const bmp = await createImageBitmap(blob);
+      if (cvs.width !== bmp.width || cvs.height !== bmp.height) { cvs.width = bmp.width; cvs.height = bmp.height; }
+      ctx.drawImage(bmp, 0, 0);
+      frameCount++;
+      const dt = (performance.now() - t0).toFixed(1);
+      $('resBadge').textContent = `${origW} x ${origH}`;
+      $('hud').textContent = `CONNECTED #${frameCount} | ${origW}x${origH} | ${dt} ms | Canvas2D`;
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      if (cvs.width !== img.width || cvs.height !== img.height) { cvs.width = img.width; cvs.height = img.height; }
+      ctx.drawImage(img, 0, 0);
+      frameCount++;
+      const dt = (performance.now() - t0).toFixed(1);
+      $('resBadge').textContent = `${origW} x ${origH}`;
+      $('hud').textContent = `CONNECTED #${frameCount} | ${origW}x${origH} | ${dt} ms | Tauri`;
+    };
+    img.src = imgSrc;
+  } catch (e) {
+    $('hud').textContent = 'ERR: ' + e.message;
+  }
+}
+
+$('btnConnect').onclick = async () => {
+  if (pollTimer) clearInterval(pollTimer);
+  try {
+    if (isTauri) {
+      const ack = await invoke('connect_remote', {
+        params: {
+          directAddr: $('connRelay').value ? null : '127.0.0.1:19800',
+          relayAddr: $('connRelay').value || null,
+          deviceId: $('connDevId').value || null,
+          token: $('connToken').value,
+          clientName: 'CopyToDesk-Tauri'
+        }
+      });
+      origW = ack.width; origH = ack.height;
+      log(`Connected: ${ack.captureBackend} ${ack.width}x${ack.height}`);
+    } else {
+      log(`Web Viewer connecting via Relay to ${$('connDevId').value}`);
+    }
+    connected = true;
+    $('globalStatus').textContent = '已连接 ' + $('connDevId').value;
+    await drawFrame();
+    pollTimer = setInterval(drawFrame, 300);
+  } catch (e) {
+    log('连接失败: ' + e);
+  }
+};
+
+$('btnDisconnect').onclick = async () => {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  connected = false;
+  if (isTauri) await invoke('disconnect_remote');
+  $('globalStatus').textContent = '已断开';
+  $('hud').textContent = 'DISCONNECTED';
+};
+
+$('btnSnap').onclick = drawFrame;
+
+cvs.addEventListener('click', async (ev) => {
+  if (!connected) return;
+  const r = cvs.getBoundingClientRect();
+  const x = Math.round(((ev.clientX - r.left) / r.width) * origW);
+  const y = Math.round(((ev.clientY - r.top) / r.height) * origH);
+  try {
+    if (isTauri) {
+      await invoke('remote_click', { x, y, button: 1 });
+    } else {
+      await fetch('/api/input', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, x, y, origW, origH })
+      });
+    }
+    log(`Click (${x}, ${y})`);
+  } catch (e) { log('Click err: ' + e); }
+});
+
+$('btnSendText').onclick = async () => {
+  const text = $('typeInput').value;
+  if (!text) return;
+  if (isTauri) {
+    await invoke('remote_type', { text });
+    log(`Typed ${text.length} chars`);
+  } else {
+    log('浏览器快速模式请使用剪贴板推送或 Tauri 桌面端输入文本');
+  }
+};
+
+$('btnClipGet').onclick = async () => {
+  try {
+    const txt = isTauri
+      ? await invoke('remote_clipboard_get')
+      : (await (await fetch('/api/clipboard', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'get' })
+        })).json()).text;
+    $('clipBox').value = txt || '';
+    log('已拉取远端剪贴板');
+  } catch (e) { log('剪贴板错误: ' + e); }
+};
+
+$('btnClipSet').onclick = async () => {
+  try {
+    const text = $('clipBox').value;
+    if (isTauri) {
+      await invoke('remote_clipboard_set', { text });
+    } else {
+      await fetch('/api/clipboard', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'set', text })
+      });
+    }
+    log('已推送剪贴板');
+  } catch (e) { log('剪贴板错误: ' + e); }
+};
+
+$('btnListDir').onclick = async () => {
+  try {
+    const raw = isTauri
+      ? await invoke('remote_list_dir', { remotePath: $('dirPath').value })
+      : await (await fetch('/api/files', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'list', remotePath: $('dirPath').value })
+        })).text();
+    const res = JSON.parse(raw);
+    const box = $('fileList');
+    box.innerHTML = '';
+    if (!res.ok) { box.textContent = res.error; return; }
+    for (const f of res.entries || []) {
+      const div = document.createElement('div');
+      div.className = 'file-item';
+      div.innerHTML = `<span>${f.isDir ? '📁 ' : '📄 '}${f.name}</span><span style="color:var(--muted)">${f.isDir ? 'DIR' : f.size + ' B'}</span>`;
+      box.appendChild(div);
+    }
+    if (!res.entries || res.entries.length === 0) box.textContent = '(空目录)';
+  } catch (e) { log('列目录失败: ' + e); }
+};
+
+$('btnUpload').onclick = async () => {
+  try {
+    const b64 = btoa(unescape(encodeURIComponent($('upContent').value)));
+    const raw = isTauri
+      ? await invoke('remote_upload_base64', { remotePath: $('upName').value, contentBase64: b64 })
+      : await (await fetch('/api/files', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'upload', remotePath: $('upName').value, contentBase64: b64 })
+        })).text();
+    log('上传结果: ' + raw);
+  } catch (e) { log('上传失败: ' + e); }
+};
+
+$('btnExec').onclick = async () => {
+  try {
+    const raw = isTauri
+      ? await invoke('remote_exec_guarded', { command: $('execCmd').value })
+      : await (await fetch('/api/exec', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, command: $('execCmd').value })
+        })).text();
+    $('execOut').textContent = raw;
+  } catch (e) { $('execOut').textContent = 'Error: ' + e; }
+};
+
+initMode();
+</script>
+</body>
+</html>

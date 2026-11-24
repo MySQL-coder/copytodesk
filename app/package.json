@@ -1,0 +1,17 @@
+{
+  "name": "copytodesk-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "description": "CopyToDesk Clean-Room Multi-Platform Remote Desktop (Tauri 2 + Rust)",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:win": "tauri build --bundles nsis,msi",
+    "build:mac": "tauri build --target universal-apple-darwin --bundles dmg",
+    "build:linux": "tauri build --bundles appimage,deb"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}
