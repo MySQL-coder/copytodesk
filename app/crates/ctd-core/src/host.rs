@@ -4,7 +4,7 @@
 
 use crate::capture::{create_capturer, now_us};
 use crate::codec::{encode_full_screenshot, CompoundTileEncoder};
-use crate::input::{DryRunAuditInjector, InputInjector};
+use crate::input::{create_injector, InputInjector};
 use ctd_protocol::{
     read_frame, write_frame, ChannelId, HelloAckPayload, HelloPayload, KeyEventPacket,
     MouseEventPacket, MsgType,
@@ -32,6 +32,8 @@ pub struct HostConfig {
     pub jpeg_quality: u8,
     pub force_synthetic: bool,
     pub file_root: PathBuf,
+    #[serde(default)]
+    pub allow_input: bool,
     pub allow_exec: bool,
     pub exec_allowlist: Vec<String>,
 }
@@ -48,6 +50,7 @@ impl Default for HostConfig {
             jpeg_quality: 75,
             force_synthetic: false,
             file_root: PathBuf::from("./shared-files"),
+            allow_input: false,
             allow_exec: false,
             exec_allowlist: vec!["echo".into(), "hostname".into(), "whoami".into()],
         }
@@ -102,7 +105,7 @@ impl HostHandle {
             capture_backend,
             latest_rgba: RwLock::new(vec![0u8; (width * height * 4) as usize]),
             clipboard: RwLock::new(String::new()),
-            injector: Arc::new(DryRunAuditInjector::default()),
+            injector: create_injector(cfg.allow_input),
             frame_tx,
             running: AtomicBool::new(true),
         });

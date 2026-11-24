@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UNIFIED_UI_PATH = path.resolve(__dirname, '..', '..', 'app', 'ui', 'index.html');
+const UNIFIED_JS_PATH = path.resolve(__dirname, '..', '..', 'app', 'ui', 'app.js');
 
 function parseArgs(argv) {
   const cfg = {
@@ -378,6 +379,12 @@ const httpServer = http.createServer(async (req, res) => {
       const html = fs.existsSync(UNIFIED_UI_PATH) ? fs.readFileSync(UNIFIED_UI_PATH, 'utf8') : WEB_VIEWER_HTML;
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(html);
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/app.js') {
+      const js = fs.existsSync(UNIFIED_JS_PATH) ? fs.readFileSync(UNIFIED_JS_PATH, 'utf8') : '';
+      res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+      res.end(js);
       return;
     }
     if (req.method === 'GET' && req.url === '/api/devices') {
