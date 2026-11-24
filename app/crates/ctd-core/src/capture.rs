@@ -92,7 +92,6 @@ impl ScreenCapturer for SyntheticCapturer {
 
 #[cfg(feature = "native-capture")]
 pub struct NativeXcapCapturer {
-    monitor: xcap::Monitor,
     width: u32,
     height: u32,
 }
@@ -103,14 +102,14 @@ impl NativeXcapCapturer {
         let monitors = xcap::Monitor::all().ok()?;
         let monitor = monitors
             .into_iter()
-            .find(|m| m.is_primary().unwrap_or(false))
+            .find(|m| m.is_primary())
             .or_else(|| xcap::Monitor::all().ok()?.into_iter().next())?;
-        let width = monitor.width().ok()?;
-        let height = monitor.height().ok()?;
+        let width = monitor.width();
+        let height = monitor.height();
         if width == 0 || height == 0 {
             return None;
         }
-        Some(Self { monitor, width, height })
+        Some(Self { width, height })
     }
 }
 
@@ -132,7 +131,9 @@ impl ScreenCapturer for NativeXcapCapturer {
     }
 
     fn capture_rgba(&mut self, buf: &mut Vec<u8>) -> bool {
-        if let Ok(img) = self.monitor.capture_image() {
+        let Ok(monitors) = xcap::Monitor::all() else { return false };
+        let Some(monitor) = monitors.into_iter().find(|m| m.is_primary()) else { return false };
+        if let Ok(img) = monitor.capture_image() {
             let raw = img.into_raw();
             if raw.len() == (self.width * self.height * 4) as usize {
                 *buf = raw;

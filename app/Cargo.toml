@@ -10,7 +10,6 @@ members = [
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-authors = ["CopyToDesk Clean-Room Contributors"]
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
