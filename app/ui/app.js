@@ -367,15 +367,18 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  $('btnDisconnect').addEventListener('click', async () => {
+  $('btnDisconnect').addEventListener('click', () => {
     loopToken++;
     connected = false;
-    if (isTauri && invoke) await invoke('disconnect_remote');
     $('connNavDot').className = 'nav-dot';
     $('hud').textContent = '已断开';
     cvs.style.display = 'none';
     $('emptyStage').style.display = 'flex';
+    switchTab('home');
     toast('已断开远程连接');
+    if (isTauri && invoke) {
+      invoke('disconnect_remote').catch(() => {});
+    }
   });
 
   $('btnSnap').addEventListener('click', drawFrame);

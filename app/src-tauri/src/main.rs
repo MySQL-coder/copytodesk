@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 struct AppState {
     host: Arc<Mutex<Option<HostHandle>>>,
     client: Arc<Mutex<Option<RemoteClient>>>,
+    client_cancel: Arc<tokio::sync::Notify>,
 }
 
 #[tauri::command]
@@ -61,15 +62,20 @@ async fn connect_remote(state: State<'_, AppState>, params: ConnectParams) -> Re
 
 #[tauri::command]
 async fn disconnect_remote(state: State<'_, AppState>) -> Result<bool, String> {
+    state.client_cancel.notify_waiters();
     *state.client.lock().await = None;
     Ok(true)
 }
 
 #[tauri::command]
 async fn remote_screenshot(state: State<'_, AppState>, max_width: u16, quality: u8) -> Result<ScreenshotResult, String> {
+    let cancel = state.client_cancel.clone();
     let mut guard = state.client.lock().await;
     let c = guard.as_mut().ok_or_else(|| "Not connected".to_string())?;
-    c.screenshot(max_width, quality, false).await
+    tokio::select! {
+        res = c.screenshot(max_width, quality, false) => res,
+        _ = cancel.notified() => Err("Disconnected".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -155,6 +161,7 @@ fn main() {
         .manage(AppState {
             host: Arc::new(Mutex::new(None)),
             client: Arc::new(Mutex::new(None)),
+            client_cancel: Arc::new(tokio::sync::Notify::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_platform_info,
