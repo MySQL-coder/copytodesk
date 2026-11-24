@@ -386,6 +386,11 @@
     <div class="viewer-bar">
       <strong style="font-size:13px">远程桌面</strong>
       <span id="hud" class="pill-dark">未连接</span>
+      <select id="viewerQuality" style="height:30px;border-radius:7px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.15);padding:0 8px;font-size:12px">
+        <option value="960:60" style="color:#000">流畅 (960p)</option>
+        <option value="1280:68" selected style="color:#000">均衡 (1280p)</option>
+        <option value="1920:78" style="color:#000">高清 (1920p)</option>
+      </select>
       <input id="typeInput" placeholder="输入文本回车发送到远端..." />
       <button id="btnSendText" class="btn sm">发送文本</button>
       <button id="btnSnap" class="btn sm ghost" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.15)">刷新画面</button>
@@ -398,7 +403,7 @@
         <div style="font-size:12.5px">请先在「远程控制」页启动本机被控（或输入对方地址）并点击「立即连接」</div>
         <button id="btnBackHome" class="btn sm">返回远程控制</button>
       </div>
-      <canvas id="screen" width="1280" height="720" style="display:none"></canvas>
+      <canvas id="screen" tabindex="0" width="1280" height="720" style="display:none;outline:none"></canvas>
     </div>
   </section>
 
@@ -471,11 +476,11 @@
       <div class="two-col">
         <div class="field"><label>本机监听地址 (Bind)</label><input id="hostBind" class="input" value="127.0.0.1:19800" /></div>
         <div class="field"><label>本机设备代码 (Device ID)</label><input id="hostDevId" class="input" value="888100200" /></div>
-        <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="" placeholder="例如 127.0.0.1:19901 或公网IP:19901" /></div>
+        <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="38.34.13.214:19901" placeholder="例如 38.34.13.214:19901" /></div>
         <div class="field" style="display:flex;flex-direction:column;justify-content:flex-end;gap:8px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
-            <input type="checkbox" id="hostAllowInput" style="width:16px;height:16px" />
-            <span>允许真实键鼠控制 (Win32 SendInput，跨机远控时开启)</span>
+            <input type="checkbox" id="hostAllowInput" checked style="width:16px;height:16px" />
+            <span>允许远程键鼠控制 (Win32 / macOS CoreGraphics，macOS 需授辅助功能权限)</span>
           </label>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
             <input type="checkbox" id="hostExec" checked style="width:16px;height:16px" />

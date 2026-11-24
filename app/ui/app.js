@@ -2,6 +2,7 @@
 
 window.addEventListener('DOMContentLoaded', () => {
   const $ = (id) => document.getElementById(id);
+  const STORAGE_KEY = 'copytodesk_settings_v1';
 
   function log(msg) {
     const el = $('eventLog');
@@ -38,16 +39,69 @@ window.addEventListener('DOMContentLoaded', () => {
 
   let invoke = getTauriInvoke();
   let isTauri = Boolean(invoke);
-  let connMode = 'direct';
-  let pollTimer = null;
+  let connMode = 'relay';
   let connected = false;
+  let loopToken = 0;
   let origW = 1280;
   let origH = 720;
   let frameCount = 0;
+  let lastMoveSent = 0;
 
   function formatDeviceCode(raw) {
     const s = String(raw || '').replace(/\s+/g, '');
-    return s.replace(/(\d{3})(?=\d)/g, '$1 ');
+    if (/^\d{6,12}$/.test(s)) return s.replace(/(\d{3})(?=\d)/g, '$1 ');
+    return s;
+  }
+
+  function saveSettings() {
+    try {
+      const data = {
+        hostDevId: $('hostDevId').value,
+        hostToken: $('hostToken').value,
+        hostBind: $('hostBind').value,
+        hostRelay: $('hostRelay').value,
+        hostAllowInput: $('hostAllowInput').checked,
+        hostExec: $('hostExec').checked,
+        connMode,
+        connDirect: $('connDirect').value,
+        connDevId: $('connDevId').value,
+        connToken: $('connToken').value,
+        viewerQuality: $('viewerQuality').value,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (typeof d.hostDevId === 'string' && d.hostDevId.trim()) $('hostDevId').value = d.hostDevId;
+      if (typeof d.hostToken === 'string') $('hostToken').value = d.hostToken;
+      if (typeof d.hostBind === 'string' && d.hostBind.trim()) $('hostBind').value = d.hostBind;
+      if (typeof d.hostRelay === 'string') $('hostRelay').value = d.hostRelay;
+      if (typeof d.hostAllowInput === 'boolean') $('hostAllowInput').checked = d.hostAllowInput;
+      if (typeof d.hostExec === 'boolean') $('hostExec').checked = d.hostExec;
+      if (typeof d.connDirect === 'string') $('connDirect').value = d.connDirect;
+      if (typeof d.connDevId === 'string') $('connDevId').value = d.connDevId;
+      if (typeof d.connToken === 'string') $('connToken').value = d.connToken;
+      if (typeof d.viewerQuality === 'string') $('viewerQuality').value = d.viewerQuality;
+      if (d.connMode === 'direct' || d.connMode === 'relay') connMode = d.connMode;
+    } catch {
+      // ignore
+    }
+  }
+
+  function applyConnMode(mode) {
+    connMode = mode;
+    document.querySelectorAll('.mode-btn').forEach((x) => x.classList.toggle('active', x.dataset.connmode === mode));
+    $('fieldDirect').style.display = mode === 'direct' ? 'block' : 'none';
+    $('fieldRelay').style.display = mode === 'relay' ? 'block' : 'none';
+    $('relayQuickBar').style.display = mode === 'relay' ? 'flex' : 'none';
+    $('relayAddrPreview').textContent = $('hostRelay').value.trim() || '38.34.13.214:19901';
   }
 
   function switchTab(name) {
@@ -58,27 +112,29 @@ window.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.nav-item').forEach((b) => {
     b.addEventListener('click', () => switchTab(b.dataset.tab));
   });
-
   if ($('btnBackHome')) $('btnBackHome').addEventListener('click', () => switchTab('home'));
   if ($('btnClearLog')) $('btnClearLog').addEventListener('click', () => { $('eventLog').textContent = ''; });
 
   document.querySelectorAll('.mode-btn').forEach((b) => {
     b.addEventListener('click', () => {
-      connMode = b.dataset.connmode;
-      document.querySelectorAll('.mode-btn').forEach((x) => x.classList.toggle('active', x === b));
-      $('fieldDirect').style.display = connMode === 'direct' ? 'block' : 'none';
-      $('fieldRelay').style.display = connMode === 'relay' ? 'block' : 'none';
-      $('relayQuickBar').style.display = connMode === 'relay' ? 'flex' : 'none';
-      $('relayAddrPreview').textContent = $('hostRelay').value.trim() || '127.0.0.1:19901';
+      applyConnMode(b.dataset.connmode);
+      saveSettings();
     });
   });
 
-  $('hostDevId').addEventListener('input', () => {
-    $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
-  });
-  $('hostBind').addEventListener('input', () => {
-    $('hostAddrHint').textContent = `直连监听：${$('hostBind').value.trim() || '127.0.0.1:19800'}`;
-  });
+  // Auto-save settings whenever any input changes
+  for (const id of ['hostDevId', 'hostToken', 'hostBind', 'hostRelay', 'connDirect', 'connDevId', 'connToken', 'viewerQuality']) {
+    $(id).addEventListener('input', () => {
+      if (id === 'hostDevId') $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
+      if (id === 'hostBind') $('hostAddrHint').textContent = `直连监听：${$('hostBind').value.trim() || '127.0.0.1:19800'}`;
+      if (id === 'hostRelay') $('relayAddrPreview').textContent = $('hostRelay').value.trim() || '未配置中继';
+      saveSettings();
+    });
+    $(id).addEventListener('change', saveSettings);
+  }
+  for (const id of ['hostAllowInput', 'hostExec']) {
+    $(id).addEventListener('change', saveSettings);
+  }
 
   $('btnCopyCode').addEventListener('click', () => {
     if (navigator.clipboard) navigator.clipboard.writeText($('hostDevId').value.trim()).catch(() => {});
@@ -96,13 +152,13 @@ window.addEventListener('DOMContentLoaded', () => {
     let p = '';
     for (let i = 0; i < 6; i++) p += chars[Math.floor(Math.random() * chars.length)];
     $('hostToken').value = p;
-    $('connToken').value = p;
+    saveSettings();
     toast('已刷新临时密码：' + p);
   });
 
   async function refreshDevices() {
     if (isTauri) {
-      toast('中继地址可在「高级设置」中修改');
+      toast('当前中继：' + ($('hostRelay').value.trim() || '未配置'));
       return;
     }
     try {
@@ -116,11 +172,12 @@ window.addEventListener('DOMContentLoaded', () => {
         card.innerHTML = `<span class="dot ok"></span><div><div style="font-weight:600;font-size:13.5px">${formatDeviceCode(d.deviceId)}</div><div style="font-size:11.5px;color:var(--muted)">${d.name}</div></div>`;
         card.addEventListener('click', () => {
           $('connDevId').value = d.deviceId;
+          saveSettings();
           toast('已选中设备 ' + d.deviceId);
         });
         wrap.appendChild(card);
       }
-      if ((data.devices || []).length > 0) $('connDevId').value = data.devices[0].deviceId;
+      if ((data.devices || []).length > 0 && !$('connDevId').value) $('connDevId').value = data.devices[0].deviceId;
       log(`在线设备数: ${(data.devices || []).length}`);
     } catch (e) {
       log('刷新设备失败: ' + e.message);
@@ -134,6 +191,7 @@ window.addEventListener('DOMContentLoaded', () => {
       toast('当前非桌面安装包环境，无法启动本机被控', 'err');
       return;
     }
+    saveSettings();
     $('btnStartHost').disabled = true;
     $('btnStartHost').textContent = '启动中...';
     try {
@@ -147,7 +205,7 @@ window.addEventListener('DOMContentLoaded', () => {
           deviceName: 'CopyToDesk-Desktop',
           relayAddr: relayVal ? relayVal : null,
           fps: 20,
-          jpegQuality: 75,
+          jpegQuality: 70,
           forceSynthetic: false,
           fileRoot: '',
           allowInput: $('hostAllowInput').checked,
@@ -158,13 +216,11 @@ window.addEventListener('DOMContentLoaded', () => {
       $('hostBadge').textContent = '被控运行中';
       $('hostBadge').className = 'badge ok';
       $('captureInfoBadge').textContent = `${st.captureBackend} · ${st.width}×${st.height}`;
-      $('hostQuickInfo').textContent = `被控运行中 (${st.bindAddr})`;
+      $('hostQuickInfo').textContent = `被控运行中 (${relayVal ? '中继已注册' : st.bindAddr})`;
       $('hostNavDot').className = 'nav-dot on';
       $('btnStartHost').style.display = 'none';
       $('btnStopHost').style.display = 'inline-flex';
-      $('connDirect').value = st.bindAddr;
-      $('connToken').value = $('hostToken').value;
-      log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} | 监听 ${st.bindAddr}`);
+      log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} | 中继=${relayVal || '无'} | 键鼠=${$('hostAllowInput').checked}`);
       toast(`被控服务已启动 (${st.width}×${st.height})`, 'ok');
     } catch (e) {
       $('hostBadge').textContent = '启动失败';
@@ -195,25 +251,35 @@ window.addEventListener('DOMContentLoaded', () => {
   const cvs = $('screen');
   const ctx = cvs.getContext('2d');
 
+  function currentQuality() {
+    const parts = ($('viewerQuality').value || '1280:68').split(':');
+    return { maxWidth: Number(parts[0]) || 1280, quality: Number(parts[1]) || 68 };
+  }
+
   async function drawFrame() {
     const t0 = performance.now();
+    const { maxWidth, quality } = currentQuality();
     try {
       if (isTauri) {
-        const res = await invoke('remote_screenshot', { maxWidth: 1280, quality: 72 });
+        const res = await invoke('remote_screenshot', { maxWidth, quality });
         origW = res.origW;
         origH = res.origH;
-        const img = new Image();
-        img.onload = () => {
-          if (cvs.width !== img.width || cvs.height !== img.height) {
-            cvs.width = img.width;
-            cvs.height = img.height;
-          }
-          ctx.drawImage(img, 0, 0);
-          frameCount++;
-          const dt = (performance.now() - t0).toFixed(0);
-          $('hud').textContent = `${origW}×${origH} · ${dt}ms · 帧 #${frameCount}`;
-        };
-        img.src = `data:${res.mimeType};base64,${res.dataBase64}`;
+        await new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            if (cvs.width !== img.width || cvs.height !== img.height) {
+              cvs.width = img.width;
+              cvs.height = img.height;
+            }
+            ctx.drawImage(img, 0, 0);
+            frameCount++;
+            const dt = (performance.now() - t0).toFixed(0);
+            $('hud').textContent = `${origW}×${origH} · ${dt}ms · 帧 #${frameCount}`;
+            resolve();
+          };
+          img.onerror = resolve;
+          img.src = `data:${res.mimeType};base64,${res.dataBase64}`;
+        });
       } else {
         const r = await fetch('/api/screenshot', {
           method: 'POST',
@@ -221,8 +287,8 @@ window.addEventListener('DOMContentLoaded', () => {
           body: JSON.stringify({
             deviceId: $('connDevId').value.replace(/\s+/g, ''),
             token: $('connToken').value,
-            maxWidth: 1280,
-            quality: 72,
+            maxWidth,
+            quality,
           }),
         });
         if (!r.ok) throw new Error(await r.text());
@@ -243,16 +309,26 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  async function runFrameLoop(myToken) {
+    while (connected && loopToken === myToken) {
+      await drawFrame();
+      // Small breather so mouse/keyboard IPC commands acquire client lock instantly between frames
+      await new Promise((r) => setTimeout(r, 70));
+    }
+  }
+
   $('btnConnect').addEventListener('click', async () => {
-    if (pollTimer) clearInterval(pollTimer);
+    loopToken++;
+    connected = false;
     invoke = getTauriInvoke();
     isTauri = Boolean(invoke);
+    saveSettings();
     $('btnConnect').disabled = true;
     $('btnConnect').textContent = '连接中...';
     try {
       if (isTauri) {
         const useRelay = connMode === 'relay';
-        const relayAddr = $('hostRelay').value.trim() || '127.0.0.1:19901';
+        const relayAddr = $('hostRelay').value.trim() || '38.34.13.214:19901';
         const ack = await invoke('connect_remote', {
           params: {
             directAddr: useRelay ? null : ($('connDirect').value.trim() || '127.0.0.1:19800'),
@@ -264,7 +340,14 @@ window.addEventListener('DOMContentLoaded', () => {
         });
         origW = ack.width;
         origH = ack.height;
-        log(`连接成功: ${ack.captureBackend} ${ack.width}x${ack.height} (输入: ${ack.inputBackend})`);
+        log(`连接成功: ${ack.captureBackend} ${ack.width}x${ack.height} (输入驱动: ${ack.inputBackend})`);
+        if (ack.inputBackend === 'DryRun-Audit') {
+          toast('已连接（对方未开启键鼠控制，仅观看模式）');
+        } else {
+          toast(`已连接 (${ack.inputBackend})`, 'ok');
+        }
+      } else {
+        toast('已建立 Web 远程连接', 'ok');
       }
       connected = true;
       frameCount = 0;
@@ -272,9 +355,9 @@ window.addEventListener('DOMContentLoaded', () => {
       $('emptyStage').style.display = 'none';
       cvs.style.display = 'block';
       switchTab('viewer');
-      toast('已建立远程连接', 'ok');
-      await drawFrame();
-      pollTimer = setInterval(drawFrame, 280);
+      cvs.focus();
+      const myToken = ++loopToken;
+      runFrameLoop(myToken);
     } catch (e) {
       log('连接失败: ' + e);
       toast('连接失败: ' + e, 'err');
@@ -285,10 +368,7 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   $('btnDisconnect').addEventListener('click', async () => {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    loopToken++;
     connected = false;
     if (isTauri && invoke) await invoke('disconnect_remote');
     $('connNavDot').className = 'nav-dot';
@@ -300,15 +380,26 @@ window.addEventListener('DOMContentLoaded', () => {
 
   $('btnSnap').addEventListener('click', drawFrame);
 
-  cvs.addEventListener('click', async (ev) => {
-    if (!connected) return;
+  // ---- Full Remote Mouse Control (Move / Left / Right / Middle / Drag / Wheel) ----
+  function mapCanvasXY(ev) {
     const r = cvs.getBoundingClientRect();
-    const x = Math.round(((ev.clientX - r.left) / r.width) * origW);
-    const y = Math.round(((ev.clientY - r.top) / r.height) * origH);
+    const x = Math.max(0, Math.min(origW, Math.round(((ev.clientX - r.left) / Math.max(1, r.width)) * origW)));
+    const y = Math.max(0, Math.min(origH, Math.round(((ev.clientY - r.top) / Math.max(1, r.height)) * origH)));
+    return { x, y };
+  }
+
+  function mapBtn(evButton) {
+    if (evButton === 2) return 2; // Right
+    if (evButton === 1) return 3; // Middle
+    return 1; // Left
+  }
+
+  async function sendMouse(action, button, x, y, wheelDelta = 0) {
+    if (!connected) return;
     try {
       if (isTauri) {
-        await invoke('remote_click', { x, y, button: 1 });
-      } else {
+        await invoke('remote_mouse_event', { action, button, x, y, wheelDelta });
+      } else if (action === 1) {
         await fetch('/api/input', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -322,9 +413,71 @@ window.addEventListener('DOMContentLoaded', () => {
           }),
         });
       }
-      log(`远程点击 (${x}, ${y})`);
-    } catch (e) {
-      toast('点击发送失败: ' + e, 'err');
+    } catch {
+      // ignore transient mouse send errors
+    }
+  }
+
+  cvs.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+  cvs.addEventListener('mousedown', (ev) => {
+    ev.preventDefault();
+    cvs.focus();
+    const { x, y } = mapCanvasXY(ev);
+    sendMouse(1, mapBtn(ev.button), x, y, 0);
+  });
+
+  cvs.addEventListener('mouseup', (ev) => {
+    ev.preventDefault();
+    const { x, y } = mapCanvasXY(ev);
+    sendMouse(2, mapBtn(ev.button), x, y, 0);
+  });
+
+  cvs.addEventListener('mousemove', (ev) => {
+    if (!connected || !isTauri) return;
+    const now = performance.now();
+    if (now - lastMoveSent < 45) return;
+    lastMoveSent = now;
+    const { x, y } = mapCanvasXY(ev);
+    sendMouse(0, 0, x, y, 0);
+  });
+
+  cvs.addEventListener('wheel', (ev) => {
+    if (!connected || !isTauri) return;
+    ev.preventDefault();
+    const { x, y } = mapCanvasXY(ev);
+    const delta = ev.deltaY < 0 ? 120 : -120;
+    sendMouse(3, 0, x, y, delta);
+  }, { passive: false });
+
+  // ---- Direct Keyboard Input on Focused Canvas ----
+  const SPECIAL_VK = {
+    Backspace: 0x08, Tab: 0x09, Enter: 0x0d, Escape: 0x1b, ' ': 0x20,
+    ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
+    Delete: 0x2e, Shift: 0x10, Control: 0x11, Alt: 0x12, Meta: 0x5b,
+  };
+
+  cvs.addEventListener('keydown', async (ev) => {
+    if (!connected || !isTauri) return;
+    ev.preventDefault();
+    if (SPECIAL_VK[ev.key]) {
+      await invoke('remote_key_event', { action: 0, vk: SPECIAL_VK[ev.key], unicodeChar: 0 }).catch(() => {});
+    } else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      await invoke('remote_key_event', { action: 2, vk: 0, unicodeChar: ev.key.codePointAt(0) }).catch(() => {});
+    } else if (ev.key.length === 1) {
+      const code = ev.key.toUpperCase().charCodeAt(0);
+      await invoke('remote_key_event', { action: 0, vk: code, unicodeChar: 0 }).catch(() => {});
+    }
+  });
+
+  cvs.addEventListener('keyup', async (ev) => {
+    if (!connected || !isTauri) return;
+    ev.preventDefault();
+    if (SPECIAL_VK[ev.key]) {
+      await invoke('remote_key_event', { action: 1, vk: SPECIAL_VK[ev.key], unicodeChar: 0 }).catch(() => {});
+    } else if (ev.key.length === 1 && (ev.ctrlKey || ev.metaKey || ev.altKey)) {
+      const code = ev.key.toUpperCase().charCodeAt(0);
+      await invoke('remote_key_event', { action: 1, vk: code, unicodeChar: 0 }).catch(() => {});
     }
   });
 
@@ -446,13 +599,16 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   async function initMode() {
-    // Wait briefly if WebView2 injects __TAURI__ asynchronously
+    loadSettings();
+    applyConnMode(connMode);
+    $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
+    $('hostAddrHint').textContent = `直连监听：${$('hostBind').value.trim() || '127.0.0.1:19800'}`;
+
     for (let i = 0; i < 10 && !getTauriInvoke(); i++) {
       await new Promise((r) => setTimeout(r, 40));
     }
     invoke = getTauriInvoke();
     isTauri = Boolean(invoke);
-    $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
 
     if (isTauri) {
       try {
@@ -474,8 +630,7 @@ window.addEventListener('DOMContentLoaded', () => {
       $('btnStartHost').disabled = true;
       $('hostBadge').textContent = '浏览器仅支持控制端';
       $('hostAddrHint').textContent = '浏览器模式请通过中继设备码连接；本机被控请使用桌面安装包。';
-      const relayBtn = document.querySelector('[data-connmode="relay"]');
-      if (relayBtn) relayBtn.click();
+      applyConnMode('relay');
       await refreshDevices();
     }
   }

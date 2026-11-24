@@ -80,6 +80,32 @@ async fn remote_click(state: State<'_, AppState>, x: u32, y: u32, button: u8) ->
 }
 
 #[tauri::command]
+async fn remote_mouse_event(
+    state: State<'_, AppState>,
+    action: u8,
+    button: u8,
+    x: u32,
+    y: u32,
+    wheel_delta: i16,
+) -> Result<(), String> {
+    let mut guard = state.client.lock().await;
+    let c = guard.as_mut().ok_or_else(|| "Not connected".to_string())?;
+    c.mouse_event(action, button, x, y, wheel_delta).await
+}
+
+#[tauri::command]
+async fn remote_key_event(
+    state: State<'_, AppState>,
+    action: u8,
+    vk: u16,
+    unicode_char: u32,
+) -> Result<(), String> {
+    let mut guard = state.client.lock().await;
+    let c = guard.as_mut().ok_or_else(|| "Not connected".to_string())?;
+    c.key_event(action, vk, unicode_char).await
+}
+
+#[tauri::command]
 async fn remote_type(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let mut guard = state.client.lock().await;
     let c = guard.as_mut().ok_or_else(|| "Not connected".to_string())?;
@@ -139,6 +165,8 @@ fn main() {
             disconnect_remote,
             remote_screenshot,
             remote_click,
+            remote_mouse_event,
+            remote_key_event,
             remote_type,
             remote_clipboard_get,
             remote_clipboard_set,

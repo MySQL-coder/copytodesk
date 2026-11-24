@@ -293,10 +293,15 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                 let quality = payload[2];
                 let as_png = payload[3] == 1;
                 let rgba = state.latest_rgba.read().await.clone();
-                if let Ok((ow, oh, img)) = encode_full_screenshot(&rgba, state.width, state.height, max_w, quality, as_png) {
+                let (w, h) = (state.width, state.height);
+                if let Ok(Ok((ow, oh, img))) = tokio::task::spawn_blocking(move || {
+                    encode_full_screenshot(&rgba, w, h, max_w, quality, as_png)
+                })
+                .await
+                {
                     let mut resp = Vec::with_capacity(13 + img.len());
-                    resp.extend_from_slice(&(state.width as u16).to_le_bytes());
-                    resp.extend_from_slice(&(state.height as u16).to_le_bytes());
+                    resp.extend_from_slice(&(w as u16).to_le_bytes());
+                    resp.extend_from_slice(&(h as u16).to_le_bytes());
                     resp.extend_from_slice(&ow.to_le_bytes());
                     resp.extend_from_slice(&oh.to_le_bytes());
                     resp.push(if as_png { 1 } else { 0 });

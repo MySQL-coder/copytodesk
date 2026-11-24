@@ -125,6 +125,18 @@ impl RemoteClient {
         Ok(())
     }
 
+    pub async fn mouse_event(&mut self, action: u8, button: u8, x: u32, y: u32, wheel_delta: i16) -> Result<(), String> {
+        let nx = ((x as u64 * 65535) / (self.ack.width.max(1) as u64)).min(65535) as u16;
+        let ny = ((y as u64 * 65535) / (self.ack.height.max(1) as u64)).min(65535) as u16;
+        let ev = MouseEventPacket { action, button, norm_x: nx, norm_y: ny, wheel_delta };
+        self.send(MsgType::MouseEvent, ChannelId::Input, &ev.serialize()).await
+    }
+
+    pub async fn key_event(&mut self, action: u8, vk: u16, unicode_char: u32) -> Result<(), String> {
+        let ev = KeyEventPacket { action, vk, scan_code: 0, flags: 0, unicode_char };
+        self.send(MsgType::KeyEvent, ChannelId::Input, &ev.serialize()).await
+    }
+
     pub async fn type_text(&mut self, text: &str) -> Result<(), String> {
         for ch in text.chars() {
             let ev = KeyEventPacket { action: 2, vk: 0, scan_code: 0, flags: 0, unicode_char: ch as u32 };

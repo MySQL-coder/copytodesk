@@ -1,6 +1,6 @@
 {
   "name": "copytodesk-desktop",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "CopyToDesk Clean-Room Multi-Platform Remote Desktop (Tauri 2 + Rust)",
   "scripts": {

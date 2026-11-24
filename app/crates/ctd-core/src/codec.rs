@@ -137,7 +137,7 @@ pub fn encode_full_screenshot(
         .ok_or_else(|| "invalid rgba dimensions".to_string())?;
     let (out_w, out_h, resized) = if max_width > 0 && width > max_width {
         let nh = ((height as u64 * max_width as u64) / width as u64).max(1) as u32;
-        let r = image::imageops::resize(&img, max_width, nh, image::imageops::FilterType::Triangle);
+        let r = image::imageops::resize(&img, max_width, nh, image::imageops::FilterType::Nearest);
         (max_width, nh, r)
     } else {
         (width, height, img)
