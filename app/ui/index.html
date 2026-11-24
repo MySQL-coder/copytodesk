@@ -3,286 +3,774 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>CopyToDesk — 跨平台远控工作台</title>
+<title>CopyToDesk — 远程控制</title>
 <style>
   :root {
-    --bg: #0c1017; --panel: #131924; --panel-2: #192231; --border: #263247;
-    --text: #e6edf3; --muted: #8b9bb4; --accent: #3b82f6; --accent-2: #2563eb;
-    --ok: #22c55e; --warn: #f59e0b; --err: #ef4444;
+    --bg: #f4f6fa;
+    --sidebar: #ffffff;
+    --card: #ffffff;
+    --border: #e6ebf2;
+    --text: #1d2433;
+    --text-2: #5b677d;
+    --muted: #8c98ad;
+    --primary: #1677ff;
+    --primary-hover: #0958d9;
+    --primary-soft: #eef5ff;
+    --ok: #10b981;
+    --ok-soft: #ecfdf5;
+    --danger: #ef4444;
+    --danger-soft: #fef2f2;
+    --shadow: 0 6px 20px rgba(15, 23, 42, 0.05);
+    --radius: 14px;
   }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
-  header { height:52px; padding:0 16px; background:var(--panel); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  .brand { display:flex; align-items:center; gap:10px; font-weight:600; letter-spacing:.2px; }
-  .pill { font-size:11px; padding:3px 8px; border-radius:999px; background:rgba(59,130,246,.15); color:#93c5fd; border:1px solid rgba(59,130,246,.35); }
-  .pill.ok { background:rgba(34,197,94,.14); color:#86efac; border-color:rgba(34,197,94,.35); }
-  .layout { flex:1; display:grid; grid-template-columns: 290px 1fr 300px; min-height:0; }
-  aside { background:var(--panel); border-right:1px solid var(--border); padding:14px; overflow-y:auto; display:flex; flex-direction:column; gap:14px; }
-  aside.right { border-right:none; border-left:1px solid var(--border); }
-  .card { background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:8px; }
-  .card h3 { margin:0; font-size:13px; color:#cbd5e1; display:flex; justify-content:space-between; align-items:center; }
-  label { font-size:11px; color:var(--muted); display:block; margin-bottom:3px; }
-  input, select, textarea { width:100%; background:#0b0f16; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12.5px; outline:none; }
-  input:focus, textarea:focus { border-color:var(--accent); }
-  button { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:7px 11px; font-size:12.5px; font-weight:500; cursor:pointer; }
-  button:hover { background:var(--accent-2); }
-  button.sec { background:#233046; color:#dbeafe; }
-  button.sec:hover { background:#2d3d59; }
-  button.danger { background:#991b1b; }
-  .row { display:flex; gap:8px; align-items:center; }
-  .row > * { flex:1; }
-  main { display:flex; flex-direction:column; min-width:0; min-height:0; background:#070a0f; }
-  .toolbar { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .stage { flex:1; display:flex; align-items:center; justify-content:center; padding:12px; overflow:auto; position:relative; }
-  canvas { max-width:100%; max-height:100%; background:#000; border:1px solid var(--border); border-radius:6px; cursor:crosshair; box-shadow:0 12px 32px rgba(0,0,0,.45); }
-  .hud { position:absolute; top:18px; left:18px; background:rgba(12,16,23,.82); border:1px solid var(--border); padding:5px 10px; border-radius:6px; font-family:Consolas,monospace; font-size:11.5px; color:#93c5fd; pointer-events:none; }
-  .log { font-family:Consolas,monospace; font-size:11px; background:#080b10; border:1px solid var(--border); border-radius:6px; padding:8px; max-height:140px; overflow:auto; white-space:pre-wrap; color:#a7f3d0; }
-  .file-list { max-height:130px; overflow:auto; font-size:12px; display:flex; flex-direction:column; gap:4px; }
-  .file-item { display:flex; justify-content:space-between; padding:4px 6px; background:#0e141f; border-radius:4px; }
-  @media (max-width: 1080px) { .layout { grid-template-columns: 260px 1fr; } aside.right { display:none; } }
+  * { box-sizing: border-box; user-select: none; }
+  input, textarea, .selectable { user-select: text; }
+  body {
+    margin: 0; height: 100vh; display: flex; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Left Navigation Rail (ToDesk-inspired) */
+  .rail {
+    width: 212px; flex-shrink: 0; background: var(--sidebar);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; padding: 18px 14px 14px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 8px 18px; border-bottom: 1px solid var(--border); margin-bottom: 14px;
+  }
+  .brand-logo {
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, #2b86ff, #165dff);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 12px rgba(22, 119, 255, 0.28);
+  }
+  .brand-title { font-size: 16px; font-weight: 700; letter-spacing: .2px; }
+  .brand-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+  .nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 10px; border: none;
+    background: transparent; color: var(--text-2);
+    font-size: 13.5px; font-weight: 500; cursor: pointer; text-align: left;
+    transition: all .15s ease;
+  }
+  .nav-item:hover { background: #f3f6fb; color: var(--text); }
+  .nav-item.active {
+    background: var(--primary-soft); color: var(--primary); font-weight: 600;
+  }
+  .nav-item svg { width: 17px; height: 17px; flex-shrink: 0; }
+  .nav-dot {
+    margin-left: auto; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok); display: none;
+  }
+  .nav-dot.on { display: block; box-shadow: 0 0 0 3px var(--ok-soft); }
+
+  .rail-footer {
+    margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .status-chip {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 10px; border-radius: 8px; background: #f8fafc;
+    border: 1px solid var(--border); font-size: 11.5px; color: var(--text-2);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(16,185,129,.18); }
+  .dot.warn { background: #f59e0b; }
+
+  /* Main Content Area */
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .tab-page { display: none; flex: 1; overflow-y: auto; padding: 24px 28px; }
+  .tab-page.active { display: flex; flex-direction: column; gap: 20px; }
+  .tab-page.viewer-tab { padding: 0; background: #0d121b; position: relative; overflow: hidden; }
+
+  .page-head { display: flex; align-items: center; justify-content: space-between; }
+  .page-head h1 { margin: 0; font-size: 20px; font-weight: 700; }
+  .page-head p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+
+  /* Cards */
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 24px; box-shadow: var(--shadow);
+  }
+  .card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 18px;
+  }
+  .card-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+    background: #f1f5f9; color: var(--text-2);
+  }
+  .badge.ok { background: var(--ok-soft); color: #059669; }
+  .badge.err { background: var(--danger-soft); color: var(--danger); }
+  .badge.blue { background: var(--primary-soft); color: var(--primary); }
+
+  /* ToDesk Hero Device Code Grid */
+  .device-grid {
+    display: grid; grid-template-columns: 1.15fr 1fr; gap: 20px; align-items: stretch;
+  }
+  .code-box {
+    background: linear-gradient(135deg, #f7faff 0%, #eff5ff 100%);
+    border: 1px solid #d9e8ff; border-radius: 12px; padding: 16px 18px;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 8px;
+  }
+  .code-label { font-size: 12px; color: var(--text-2); display: flex; justify-content: space-between; align-items: center; }
+  .code-value {
+    font-family: "SF Mono", Consolas, monospace; font-size: 30px; font-weight: 700;
+    color: var(--primary); letter-spacing: 2px;
+  }
+  .pwd-box {
+    background: #f8fafc; border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 8px;
+  }
+  .pwd-row { display: flex; align-items: center; gap: 8px; }
+  .pwd-input {
+    font-family: "SF Mono", Consolas, monospace; font-size: 20px; font-weight: 600;
+    letter-spacing: 1px; border: none; background: transparent; color: var(--text);
+    width: 100%; outline: none; padding: 2px 0;
+  }
+
+  /* Connect Bar (ToDesk Signature) */
+  .mode-switch {
+    display: inline-flex; background: #f1f5f9; padding: 3px; border-radius: 9px; gap: 3px;
+  }
+  .mode-btn {
+    border: none; background: transparent; color: var(--text-2);
+    padding: 5px 12px; border-radius: 7px; font-size: 12px; font-weight: 500; cursor: pointer;
+  }
+  .mode-btn.active { background: #fff; color: var(--primary); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+
+  .connect-bar {
+    display: grid; grid-template-columns: 1.5fr 1fr auto; gap: 12px; align-items: end;
+  }
+  .field label { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 6px; font-weight: 500; }
+  .input {
+    width: 100%; height: 42px; padding: 0 13px; border-radius: 10px;
+    border: 1.5px solid var(--border); background: #fff; color: var(--text);
+    font-size: 14px; outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  .input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(22,119,255,.12); }
+  textarea.input { height: auto; padding: 10px 13px; font-family: inherit; resize: vertical; }
+
+  /* Buttons */
+  .btn {
+    height: 42px; padding: 0 22px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #257cff, #1666f0); color: #fff;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    box-shadow: 0 4px 12px rgba(22, 119, 255, 0.25); transition: transform .1s, filter .15s;
+  }
+  .btn:hover { filter: brightness(1.05); }
+  .btn:active { transform: scale(0.98); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+  .btn.sm { height: 34px; padding: 0 14px; font-size: 12.5px; border-radius: 8px; }
+  .btn.ghost {
+    background: #fff; color: var(--text); border: 1px solid var(--border); box-shadow: none;
+  }
+  .btn.ghost:hover { background: #f8fafc; border-color: #cbd5e1; }
+  .btn.danger { background: var(--danger); box-shadow: 0 4px 12px rgba(239,68,68,.22); }
+  .btn.ok { background: var(--ok); box-shadow: 0 4px 12px rgba(16,185,129,.22); }
+  .icon-btn {
+    border: 1px solid var(--border); background: #fff; color: var(--text-2);
+    width: 30px; height: 30px; border-radius: 7px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .icon-btn:hover { color: var(--primary); border-color: #bfdbfe; background: var(--primary-soft); }
+
+  /* Device Quick Cards */
+  .dev-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; margin-top: 16px; }
+  .dev-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+    background: #fafcff; cursor: pointer; transition: all .15s;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .dev-card:hover { border-color: var(--primary); background: var(--primary-soft); }
+
+  /* Remote Viewer Cinema Stage */
+  .viewer-bar {
+    height: 48px; padding: 0 16px; background: rgba(17, 24, 39, 0.92);
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    display: flex; align-items: center; gap: 10px; color: #e2e8f0;
+  }
+  .viewer-bar .pill-dark {
+    padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,.08);
+    font-family: Consolas, monospace; font-size: 11.5px; color: #93c5fd;
+  }
+  .viewer-bar input {
+    height: 30px; border-radius: 7px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.07); color: #fff; padding: 0 10px; font-size: 12px; width: 210px; outline: none;
+  }
+  .viewer-stage {
+    flex: 1; display: flex; align-items: center; justify-content: center; padding: 14px; overflow: auto;
+  }
+  .viewer-stage canvas {
+    max-width: 100%; max-height: 100%; background: #000; border-radius: 8px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.55); cursor: crosshair;
+  }
+  .empty-stage {
+    text-align: center; color: #94a3b8; display: flex; flex-direction: column; align-items: center; gap: 12px;
+  }
+
+  /* File & Ops Layouts */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .file-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; margin-top: 10px; }
+  .file-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 12px; border-radius: 8px; background: #f8fafc; border: 1px solid var(--border); font-size: 13px;
+  }
+  .terminal {
+    font-family: "SF Mono", Consolas, monospace; font-size: 12px; line-height: 1.5;
+    background: #0f172a; color: #a7f3d0; border-radius: 10px; padding: 12px 14px;
+    min-height: 150px; max-height: 260px; overflow: auto; white-space: pre-wrap;
+  }
+
+  /* Toast */
+  .toast-wrap {
+    position: fixed; top: 18px; right: 20px; z-index: 9999;
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+  }
+  .toast {
+    background: #1e293b; color: #fff; padding: 10px 16px; border-radius: 10px;
+    font-size: 13px; box-shadow: 0 10px 25px rgba(0,0,0,.18);
+    display: flex; align-items: center; gap: 8px; animation: fadeIn .18s ease;
+  }
+  .toast.ok { background: #059669; }
+  .toast.err { background: #dc2626; }
+  @keyframes fadeIn { from { opacity:0; transform: translateY(-6px); } to { opacity:1; transform: translateY(0); } }
 </style>
 </head>
 <body>
-<header>
+
+<nav class="rail">
   <div class="brand">
-    <span>CopyToDesk</span>
-    <span id="modeBadge" class="pill">检测运行模式...</span>
-    <span class="pill ok">零显卡 Canvas2D 兼容</span>
+    <div class="brand-logo">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+      </svg>
+    </div>
+    <div>
+      <div class="brand-title">CopyToDesk</div>
+      <div class="brand-sub" id="modeSubtitle">桌面远控工作台</div>
+    </div>
   </div>
-  <div style="font-size:12px;color:var(--muted)" id="globalStatus">就绪</div>
-</header>
 
-<div class="layout">
-  <aside>
-    <div class="card">
-      <h3>本机被控端 (Host) <span id="hostBadge" class="pill">未启动</span></h3>
-      <div><label>设备代码 (Device ID)</label><input id="hostDevId" value="888100200" /></div>
-      <div><label>访问令牌 (Token)</label><input id="hostToken" value="demo123" /></div>
-      <div><label>中继地址 (Relay TCP)</label><input id="hostRelay" value="127.0.0.1:19901" /></div>
-      <div class="row">
-        <label style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" id="hostExec" style="width:auto" /> 允许白名单 Exec</label>
+  <div class="nav">
+    <button class="nav-item active" data-tab="home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>
+      远程控制
+      <span id="hostNavDot" class="nav-dot"></span>
+    </button>
+    <button class="nav-item" data-tab="viewer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      远程画面
+      <span id="connNavDot" class="nav-dot"></span>
+    </button>
+    <button class="nav-item" data-tab="files">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      文件传输
+    </button>
+    <button class="nav-item" data-tab="ops">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      剪贴板与运维
+    </button>
+    <button class="nav-item" data-tab="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      高级设置与日志
+    </button>
+  </div>
+
+  <div class="rail-footer">
+    <div class="status-chip">
+      <span id="engineDot" class="dot"></span>
+      <span id="engineText">初始化中...</span>
+    </div>
+    <div style="font-size:11px;color:var(--muted);padding:0 6px" id="hostQuickInfo">被控服务：未启动</div>
+  </div>
+</nav>
+
+<main class="content">
+  <!-- TAB 1: HOME (Classic ToDesk Layout) -->
+  <section id="tab-home" class="tab-page active">
+    <div class="page-head">
+      <div>
+        <h1>远程控制</h1>
+        <p>支持零显卡自动降级 · 本机/局域网直连或中继设备码穿透</p>
       </div>
-      <div class="row">
-        <button id="btnStartHost">启动被控</button>
-        <button id="btnStopHost" class="danger">停止</button>
+      <span id="hostBadge" class="badge">被控未启动</span>
+    </div>
+
+    <!-- Card 1: This Device -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          允许控制本设备
+          <span class="badge blue" id="captureInfoBadge">待启动</span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button id="btnStartHost" class="btn sm">启动被控服务</button>
+          <button id="btnStopHost" class="btn sm ghost" style="display:none">停止服务</button>
+        </div>
       </div>
-      <div style="font-size:11px;color:var(--muted)" id="hostHint">桌面端 Tauri 模式可直接启停本机 Rust 被控引擎。</div>
-    </div>
 
-    <div class="card">
-      <h3>在线设备发现 <button id="btnRefreshDevs" class="sec" style="padding:3px 8px;font-size:11px">刷新</button></h3>
-      <select id="devSelect"></select>
-      <div><label>中继地址 / 直连地址</label><input id="connRelay" value="127.0.0.1:19901" placeholder="留空则直连" /></div>
-      <div><label>目标设备码</label><input id="connDevId" value="888100200" /></div>
-      <div><label>会话令牌 (Token)</label><input id="connToken" value="demo123" /></div>
-      <div class="row">
-        <button id="btnConnect">连接远控</button>
-        <button id="btnDisconnect" class="sec">断开</button>
-      </div>
-    </div>
+      <div class="device-grid">
+        <div class="code-box">
+          <div class="code-label">
+            <span>本机设备代码</span>
+            <button id="btnCopyCode" class="icon-btn" title="复制设备代码">📋</button>
+          </div>
+          <div class="code-value selectable" id="displayCode">888 100 200</div>
+          <div style="font-size:11.5px;color:var(--text-2)" id="hostAddrHint">直连监听：127.0.0.1:19800（可在高级设置修改中继）</div>
+        </div>
 
-    <div class="card">
-      <h3>事件日志</h3>
-      <div id="eventLog" class="log">Waiting for connection...</div>
-    </div>
-  </aside>
-
-  <main>
-    <div class="toolbar">
-      <button id="btnSnap" class="sec">单次截屏</button>
-      <input id="typeInput" placeholder="输入文本发送到远端窗口..." style="max-width:260px" />
-      <button id="btnSendText" class="sec">发送文本</button>
-      <span style="margin-left:auto;font-size:12px;color:var(--muted)" id="resBadge">-- x --</span>
-    </div>
-    <div class="stage">
-      <div id="hud" class="hud">IDLE | Zero-GPU Canvas2D</div>
-      <canvas id="screen" width="1280" height="720"></canvas>
-    </div>
-  </main>
-
-  <aside class="right">
-    <div class="card">
-      <h3>双向剪贴板同步</h3>
-      <textarea id="clipBox" rows="3" placeholder="剪贴板文本内容..."></textarea>
-      <div class="row">
-        <button id="btnClipGet" class="sec">拉取远端</button>
-        <button id="btnClipSet">推送到远端</button>
+        <div class="pwd-box">
+          <div class="code-label">
+            <span>临时访问密码</span>
+            <div style="display:flex;gap:5px">
+              <button id="btnTogglePwd" class="icon-btn" title="显示/隐藏">👁</button>
+              <button id="btnGenPwd" class="icon-btn" title="刷新随机密码">↻</button>
+              <button id="btnCopyPwd" class="icon-btn" title="复制密码">📋</button>
+            </div>
+          </div>
+          <div class="pwd-row">
+            <input id="hostToken" class="pwd-input" type="text" value="demo123" />
+          </div>
+          <div style="font-size:11.5px;color:var(--muted)">控制端连接时需填写此密码，支持随时刷新</div>
+        </div>
       </div>
     </div>
 
+    <!-- Card 2: Connect Remote -->
     <div class="card">
-      <h3>沙箱文件管理 (SHA-256)</h3>
-      <div class="row">
-        <input id="dirPath" placeholder="相对目录 (留空=根目录)" value="" />
-        <button id="btnListDir" class="sec" style="flex:0 0 auto">列表</button>
+      <div class="card-header">
+        <div class="card-title">控制远程设备</div>
+        <div class="mode-switch">
+          <button class="mode-btn active" data-connmode="direct">本机 / 局域网直连</button>
+          <button class="mode-btn" data-connmode="relay">中继设备码连接</button>
+        </div>
       </div>
-      <div id="fileList" class="file-list"><div style="color:var(--muted)">尚未加载</div></div>
-      <div><label>快速上传文本文件到远端</label><input id="upName" value="notes/hello.txt" /></div>
-      <input id="upContent" value="Uploaded from CopyToDesk Unified UI" />
-      <button id="btnUpload">校验并上传</button>
+
+      <div class="connect-bar">
+        <div class="field" id="fieldDirect">
+          <label>远程主机直连地址 (IP:端口)</label>
+          <input id="connDirect" class="input" value="127.0.0.1:19800" placeholder="例如 192.168.1.100:19800" />
+        </div>
+        <div class="field" id="fieldRelay" style="display:none">
+          <label>伙伴设备代码 (通过中继服务器)</label>
+          <input id="connDevId" class="input" value="888100200" placeholder="请输入 9 位设备代码" />
+        </div>
+        <div class="field">
+          <label>临时访问密码</label>
+          <input id="connToken" class="input" value="demo123" placeholder="输入对方临时密码" />
+        </div>
+        <button id="btnConnect" class="btn">立即连接</button>
+      </div>
+
+      <div id="relayQuickBar" style="display:none;margin-top:12px;align-items:center;justify-content:space-between;gap:10px">
+        <div style="font-size:12px;color:var(--text-2)">当前中继服务器：<strong id="relayAddrPreview">127.0.0.1:19901</strong></div>
+        <button id="btnRefreshDevs" class="btn sm ghost">刷新在线设备</button>
+      </div>
+      <div id="devCards" class="dev-cards"></div>
+    </div>
+  </section>
+
+  <!-- TAB 2: REMOTE VIEWER -->
+  <section id="tab-viewer" class="tab-page viewer-tab">
+    <div class="viewer-bar">
+      <strong style="font-size:13px">远程桌面</strong>
+      <span id="hud" class="pill-dark">未连接</span>
+      <input id="typeInput" placeholder="输入文本回车发送到远端..." />
+      <button id="btnSendText" class="btn sm">发送文本</button>
+      <button id="btnSnap" class="btn sm ghost" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.15)">刷新画面</button>
+      <button id="btnDisconnect" class="btn sm danger" style="margin-left:auto">断开连接</button>
+    </div>
+    <div class="viewer-stage">
+      <div id="emptyStage" class="empty-stage">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <div style="font-size:15px;color:#cbd5e1;font-weight:600">尚未连接远程设备</div>
+        <div style="font-size:12.5px">请先在「远程控制」页启动本机被控（或输入对方地址）并点击「立即连接」</div>
+        <button class="btn sm" onclick="switchTab('home')">返回远程控制</button>
+      </div>
+      <canvas id="screen" width="1280" height="720" style="display:none"></canvas>
+    </div>
+  </section>
+
+  <!-- TAB 3: FILES -->
+  <section id="tab-files" class="tab-page">
+    <div class="page-head">
+      <div>
+        <h1>安全文件传输（SHA-256 校验）</h1>
+        <p>读写受沙箱目录隔离保护，防止路径越权访问</p>
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="card">
+        <div class="card-header"><div class="card-title">远端共享目录</div></div>
+        <div style="display:flex;gap:8px">
+          <input id="dirPath" class="input" placeholder="相对目录（留空=根目录）" value="" />
+          <button id="btnListDir" class="btn sm" style="height:42px;flex-shrink:0">浏览</button>
+        </div>
+        <div id="fileList" class="file-list"><div style="color:var(--muted);font-size:13px;padding:12px 0">连接远端后点击「浏览」查看文件</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">上传文件到远端</div></div>
+        <div class="field"><label>远端保存路径（相对路径）</label><input id="upName" class="input" value="notes/hello.txt" /></div>
+        <div class="field" style="margin-top:12px"><label>文件内容（文本）</label><textarea id="upContent" class="input" rows="5">Uploaded from CopyToDesk Desktop</textarea></div>
+        <button id="btnUpload" class="btn" style="margin-top:14px;width:100%">计算 SHA-256 并上传</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- TAB 4: CLIPBOARD & OPS -->
+  <section id="tab-ops" class="tab-page">
+    <div class="page-head">
+      <div>
+        <h1>双向剪贴板与白名单运维</h1>
+        <p>同步远程文本剪贴板，或在白名单护栏下执行只读运维命令</p>
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="card">
+        <div class="card-header"><div class="card-title">双向剪贴板</div></div>
+        <textarea id="clipBox" class="input" rows="6" placeholder="在此输入文本推送至远端，或点击拉取获取远端剪贴板..."></textarea>
+        <div style="display:flex;gap:10px;margin-top:14px">
+          <button id="btnClipGet" class="btn ghost" style="flex:1">拉取远端剪贴板</button>
+          <button id="btnClipSet" class="btn" style="flex:1">推送到远端</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">受控命令执行 (Allowlist)</div></div>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <input id="execCmd" class="input" value="echo Hello_CopyToDesk" />
+          <button id="btnExec" class="btn sm" style="height:42px;flex-shrink:0">执行</button>
+        </div>
+        <div id="execOut" class="terminal">等待执行命令（默认仅放行 echo / hostname / whoami）...</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TAB 5: SETTINGS & LOGS -->
+  <section id="tab-settings" class="tab-page">
+    <div class="page-head">
+      <div>
+        <h1>高级设置与运行日志</h1>
+        <p>配置监听端口、中继服务器地址与安全选项</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title">网络与被控参数</div></div>
+      <div class="two-col">
+        <div class="field"><label>本机监听地址 (Bind)</label><input id="hostBind" class="input" value="127.0.0.1:19800" /></div>
+        <div class="field"><label>本机设备代码 (Device ID)</label><input id="hostDevId" class="input" value="888100200" /></div>
+        <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="" placeholder="例如 127.0.0.1:19901 或公网IP:19901" /></div>
+        <div class="field" style="display:flex;align-items:flex-end">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;height:42px;margin:0">
+            <input type="checkbox" id="hostExec" checked style="width:16px;height:16px" />
+            <span>允许受控白名单命令 (echo / hostname / whoami)</span>
+          </label>
+        </div>
+      </div>
     </div>
 
     <div class="card">
-      <h3>白名单受控命令 (Exec)</h3>
-      <input id="execCmd" value="echo Hello_CopyToDesk" />
-      <button id="btnExec" class="sec">执行受控命令</button>
-      <div id="execOut" class="log">等待执行...</div>
+      <div class="card-header">
+        <div class="card-title">实时运行日志</div>
+        <button class="btn sm ghost" onclick="$('eventLog').textContent=''">清空</button>
+      </div>
+      <div id="eventLog" class="terminal">CopyToDesk 初始化中...</div>
     </div>
-  </aside>
-</div>
+  </section>
+</main>
+
+<div id="toastWrap" class="toast-wrap"></div>
 
 <script>
-const isTauri = Boolean(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke);
-const invoke = isTauri ? window.__TAURI__.core.invoke : null;
-
 const $ = (id) => document.getElementById(id);
-const cvs = $('screen');
-const ctx = cvs.getContext('2d');
+
+function getTauriInvoke() {
+  if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
+    return window.__TAURI__.core.invoke;
+  }
+  if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+    return window.__TAURI_INTERNALS__.invoke;
+  }
+  return null;
+}
+
+let invoke = getTauriInvoke();
+let isTauri = Boolean(invoke);
+let connMode = 'direct';
 let pollTimer = null;
 let connected = false;
 let origW = 1280, origH = 720, frameCount = 0;
 
-function log(msg) {
-  const el = $('eventLog');
-  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent.slice(0, 1500);
+function toast(msg, type = '') {
+  const d = document.createElement('div');
+  d.className = 'toast ' + type;
+  d.textContent = msg;
+  $('toastWrap').appendChild(d);
+  setTimeout(() => d.remove(), 3200);
 }
 
+function log(msg) {
+  const el = $('eventLog');
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent.slice(0, 3000);
+}
+
+function formatDeviceCode(raw) {
+  const s = String(raw || '').replace(/\s+/g, '');
+  return s.replace(/(\d{3})(?=\d)/g, '$1 ');
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-page').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
+}
+document.querySelectorAll('.nav-item').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+document.querySelectorAll('.mode-btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    connMode = b.dataset.connmode;
+    document.querySelectorAll('.mode-btn').forEach((x) => x.classList.toggle('active', x === b));
+    $('fieldDirect').style.display = connMode === 'direct' ? 'block' : 'none';
+    $('fieldRelay').style.display = connMode === 'relay' ? 'block' : 'none';
+    $('relayQuickBar').style.display = connMode === 'relay' ? 'flex' : 'none';
+    $('relayAddrPreview').textContent = $('hostRelay').value.trim() || '127.0.0.1:19901';
+  });
+});
+
+$('hostDevId').addEventListener('input', () => {
+  $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
+});
+$('hostBind').addEventListener('input', () => {
+  $('hostAddrHint').textContent = `直连监听：${$('hostBind').value.trim() || '127.0.0.1:19800'}`;
+});
+
+$('btnCopyCode').onclick = () => {
+  navigator.clipboard?.writeText($('hostDevId').value.trim());
+  toast('已复制设备代码', 'ok');
+};
+$('btnCopyPwd').onclick = () => {
+  navigator.clipboard?.writeText($('hostToken').value);
+  toast('已复制临时密码', 'ok');
+};
+$('btnTogglePwd').onclick = () => {
+  $('hostToken').type = $('hostToken').type === 'password' ? 'text' : 'password';
+};
+$('btnGenPwd').onclick = () => {
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let p = '';
+  for (let i = 0; i < 6; i++) p += chars[Math.floor(Math.random() * chars.length)];
+  $('hostToken').value = p;
+  $('connToken').value = p;
+  toast('已刷新临时密码：' + p);
+};
+
 async function initMode() {
+  invoke = getTauriInvoke();
+  isTauri = Boolean(invoke);
+  $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
+
   if (isTauri) {
-    const info = await invoke('get_platform_info');
-    $('modeBadge').textContent = `Tauri 2 Native (${info.os}/${info.arch})`;
-    log(`Running in Tauri Desktop Bundle v${info.version}`);
+    try {
+      const info = await invoke('get_platform_info');
+      $('modeSubtitle').textContent = `Tauri 2 · ${info.os}/${info.arch}`;
+      $('engineDot').className = 'dot ok';
+      $('engineText').textContent = `原生引擎就绪 v${info.version}`;
+      log(`Tauri 2 原生引擎初始化成功 (${info.os}/${info.arch} v${info.version})`);
+    } catch (e) {
+      $('engineDot').className = 'dot warn';
+      $('engineText').textContent = 'IPC 通信异常';
+      log('IPC 初始化失败: ' + e);
+      toast('IPC 初始化失败: ' + e, 'err');
+    }
   } else {
-    $('modeBadge').textContent = 'Web Viewer 模式 (HTTP/Relay)';
+    $('modeSubtitle').textContent = '浏览器零安装模式';
+    $('engineDot').className = 'dot ok';
+    $('engineText').textContent = 'Web Canvas2D 模式';
     $('btnStartHost').disabled = true;
-    $('btnStopHost').disabled = true;
-    $('hostHint').textContent = '当前为浏览器零安装模式；本机被控请运行 CopyToDesk.Host.exe 或使用 Tauri 桌面安装包。';
+    $('hostBadge').textContent = '浏览器仅支持控制端';
+    $('hostAddrHint').textContent = '浏览器模式请通过中继设备码连接；本机被控请使用桌面安装包。';
+    document.querySelector('[data-connmode="relay"]').click();
     await refreshDevices();
   }
 }
 
 async function refreshDevices() {
-  if (isTauri) return;
+  if (isTauri) {
+    toast('中继地址可在「高级设置」中修改');
+    return;
+  }
   try {
     const r = await fetch('/api/devices');
     const data = await r.json();
-    const sel = $('devSelect');
-    sel.innerHTML = '';
-    for (const d of data.devices) {
-      const opt = document.createElement('option');
-      opt.value = d.deviceId;
-      opt.textContent = `${d.deviceId} (${d.name})`;
-      sel.appendChild(opt);
+    const wrap = $('devCards');
+    wrap.innerHTML = '';
+    for (const d of data.devices || []) {
+      const card = document.createElement('div');
+      card.className = 'dev-card';
+      card.innerHTML = `<span class="dot ok"></span><div><div style="font-weight:600;font-size:13.5px">${formatDeviceCode(d.deviceId)}</div><div style="font-size:11.5px;color:var(--muted)">${d.name}</div></div>`;
+      card.onclick = () => {
+        $('connDevId').value = d.deviceId;
+        toast('已选中设备 ' + d.deviceId);
+      };
+      wrap.appendChild(card);
     }
-    if (data.devices.length > 0) $('connDevId').value = data.devices[0].deviceId;
-    log(`在线设备: ${data.devices.length}`);
+    if ((data.devices || []).length > 0) $('connDevId').value = data.devices[0].deviceId;
+    log(`在线设备数: ${(data.devices || []).length}`);
   } catch (e) {
     log('刷新设备失败: ' + e.message);
   }
 }
-
-$('devSelect').addEventListener('change', () => {
-  if ($('devSelect').value) $('connDevId').value = $('devSelect').value;
-});
 $('btnRefreshDevs').onclick = refreshDevices;
 
 $('btnStartHost').onclick = async () => {
-  if (!isTauri) return;
+  invoke = getTauriInvoke();
+  if (!invoke) {
+    toast('当前非桌面安装包环境，无法启动本机被控', 'err');
+    return;
+  }
+  $('btnStartHost').disabled = true;
+  $('btnStartHost').textContent = '启动中...';
   try {
+    const bindAddr = $('hostBind').value.trim() || '127.0.0.1:19800';
+    const relayVal = $('hostRelay').value.trim();
     const st = await invoke('start_host', {
       config: {
-        bindAddr: '127.0.0.1:19800',
+        bindAddr,
         token: $('hostToken').value,
-        deviceId: $('hostDevId').value,
-        deviceName: 'Tauri-Desktop',
-        relayAddr: $('hostRelay').value || null,
-        fps: 30,
+        deviceId: $('hostDevId').value.replace(/\s+/g, '') || '888100200',
+        deviceName: 'CopyToDesk-Desktop',
+        relayAddr: relayVal ? relayVal : null,
+        fps: 20,
         jpegQuality: 75,
         forceSynthetic: false,
-        fileRoot: './shared-files',
+        fileRoot: '',
         allowExec: $('hostExec').checked,
         execAllowlist: ['echo', 'hostname', 'whoami']
       }
     });
-    $('hostBadge').textContent = '运行中';
-    $('hostBadge').className = 'pill ok';
-    log(`Host started: ${st.captureBackend} ${st.width}x${st.height}`);
-  } catch (e) { log('启动失败: ' + e); }
+    $('hostBadge').textContent = '被控运行中';
+    $('hostBadge').className = 'badge ok';
+    $('captureInfoBadge').textContent = `${st.captureBackend} · ${st.width}×${st.height}`;
+    $('hostQuickInfo').textContent = `被控运行中 (${st.bindAddr})`;
+    $('hostNavDot').className = 'nav-dot on';
+    $('btnStartHost').style.display = 'none';
+    $('btnStopHost').style.display = 'inline-flex';
+    $('connDirect').value = st.bindAddr;
+    $('connToken').value = $('hostToken').value;
+    log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} | 监听 ${st.bindAddr}`);
+    toast(`被控服务已启动 (${st.width}×${st.height})`, 'ok');
+  } catch (e) {
+    $('hostBadge').textContent = '启动失败';
+    $('hostBadge').className = 'badge err';
+    log('被控启动失败: ' + e);
+    toast('启动失败: ' + e, 'err');
+  } finally {
+    $('btnStartHost').disabled = false;
+    $('btnStartHost').textContent = '启动被控服务';
+  }
 };
 
 $('btnStopHost').onclick = async () => {
-  if (!isTauri) return;
+  invoke = getTauriInvoke();
+  if (!invoke) return;
   await invoke('stop_host');
-  $('hostBadge').textContent = '已停止';
-  $('hostBadge').className = 'pill';
-  log('Host stopped');
+  $('hostBadge').textContent = '被控已停止';
+  $('hostBadge').className = 'badge';
+  $('captureInfoBadge').textContent = '待启动';
+  $('hostQuickInfo').textContent = '被控服务：已停止';
+  $('hostNavDot').className = 'nav-dot';
+  $('btnStopHost').style.display = 'none';
+  $('btnStartHost').style.display = 'inline-flex';
+  log('被控服务已停止');
+  toast('已停止本机被控服务');
 };
+
+const cvs = $('screen');
+const ctx = cvs.getContext('2d');
 
 async function drawFrame() {
   const t0 = performance.now();
   try {
-    let imgSrc = null;
     if (isTauri) {
       const res = await invoke('remote_screenshot', { maxWidth: 1280, quality: 72 });
       origW = res.origW; origH = res.origH;
-      imgSrc = `data:${res.mimeType};base64,${res.dataBase64}`;
+      const img = new Image();
+      img.onload = () => {
+        if (cvs.width !== img.width || cvs.height !== img.height) { cvs.width = img.width; cvs.height = img.height; }
+        ctx.drawImage(img, 0, 0);
+        frameCount++;
+        const dt = (performance.now() - t0).toFixed(0);
+        $('hud').textContent = `${origW}×${origH} · ${dt}ms · 帧 #${frameCount}`;
+      };
+      img.src = `data:${res.mimeType};base64,${res.dataBase64}`;
     } else {
       const r = await fetch('/api/screenshot', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, maxWidth: 1280, quality: 72 })
+        body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, maxWidth: 1280, quality: 72 })
       });
       if (!r.ok) throw new Error(await r.text());
       origW = Number(r.headers.get('x-orig-w') || 1280);
       origH = Number(r.headers.get('x-orig-h') || 720);
-      const blob = await r.blob();
-      const bmp = await createImageBitmap(blob);
+      const bmp = await createImageBitmap(await r.blob());
       if (cvs.width !== bmp.width || cvs.height !== bmp.height) { cvs.width = bmp.width; cvs.height = bmp.height; }
       ctx.drawImage(bmp, 0, 0);
       frameCount++;
-      const dt = (performance.now() - t0).toFixed(1);
-      $('resBadge').textContent = `${origW} x ${origH}`;
-      $('hud').textContent = `CONNECTED #${frameCount} | ${origW}x${origH} | ${dt} ms | Canvas2D`;
-      return;
+      const dt = (performance.now() - t0).toFixed(0);
+      $('hud').textContent = `${origW}×${origH} · ${dt}ms · Canvas2D #${frameCount}`;
     }
-    const img = new Image();
-    img.onload = () => {
-      if (cvs.width !== img.width || cvs.height !== img.height) { cvs.width = img.width; cvs.height = img.height; }
-      ctx.drawImage(img, 0, 0);
-      frameCount++;
-      const dt = (performance.now() - t0).toFixed(1);
-      $('resBadge').textContent = `${origW} x ${origH}`;
-      $('hud').textContent = `CONNECTED #${frameCount} | ${origW}x${origH} | ${dt} ms | Tauri`;
-    };
-    img.src = imgSrc;
   } catch (e) {
-    $('hud').textContent = 'ERR: ' + e.message;
+    $('hud').textContent = '拉帧失败: ' + e;
   }
 }
 
 $('btnConnect').onclick = async () => {
   if (pollTimer) clearInterval(pollTimer);
+  invoke = getTauriInvoke();
+  isTauri = Boolean(invoke);
+  $('btnConnect').disabled = true;
+  $('btnConnect').textContent = '连接中...';
   try {
     if (isTauri) {
+      const useRelay = connMode === 'relay';
+      const relayAddr = $('hostRelay').value.trim() || '127.0.0.1:19901';
       const ack = await invoke('connect_remote', {
         params: {
-          directAddr: $('connRelay').value ? null : '127.0.0.1:19800',
-          relayAddr: $('connRelay').value || null,
-          deviceId: $('connDevId').value || null,
+          directAddr: useRelay ? null : ($('connDirect').value.trim() || '127.0.0.1:19800'),
+          relayAddr: useRelay ? relayAddr : null,
+          deviceId: useRelay ? ($('connDevId').value.replace(/\s+/g, '') || '888100200') : null,
           token: $('connToken').value,
-          clientName: 'CopyToDesk-Tauri'
+          clientName: 'CopyToDesk-Desktop'
         }
       });
       origW = ack.width; origH = ack.height;
-      log(`Connected: ${ack.captureBackend} ${ack.width}x${ack.height}`);
-    } else {
-      log(`Web Viewer connecting via Relay to ${$('connDevId').value}`);
+      log(`连接成功: ${ack.captureBackend} ${ack.width}x${ack.height}`);
     }
     connected = true;
-    $('globalStatus').textContent = '已连接 ' + $('connDevId').value;
+    frameCount = 0;
+    $('connNavDot').className = 'nav-dot on';
+    $('emptyStage').style.display = 'none';
+    cvs.style.display = 'block';
+    switchTab('viewer');
+    toast('已建立远程连接', 'ok');
     await drawFrame();
-    pollTimer = setInterval(drawFrame, 300);
+    pollTimer = setInterval(drawFrame, 280);
   } catch (e) {
     log('连接失败: ' + e);
+    toast('连接失败: ' + e, 'err');
+  } finally {
+    $('btnConnect').disabled = false;
+    $('btnConnect').textContent = '立即连接';
   }
 };
 
@@ -290,8 +778,11 @@ $('btnDisconnect').onclick = async () => {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   connected = false;
   if (isTauri) await invoke('disconnect_remote');
-  $('globalStatus').textContent = '已断开';
-  $('hud').textContent = 'DISCONNECTED';
+  $('connNavDot').className = 'nav-dot';
+  $('hud').textContent = '已断开';
+  cvs.style.display = 'none';
+  $('emptyStage').style.display = 'flex';
+  toast('已断开远程连接');
 };
 
 $('btnSnap').onclick = drawFrame;
@@ -302,16 +793,13 @@ cvs.addEventListener('click', async (ev) => {
   const x = Math.round(((ev.clientX - r.left) / r.width) * origW);
   const y = Math.round(((ev.clientY - r.top) / r.height) * origH);
   try {
-    if (isTauri) {
-      await invoke('remote_click', { x, y, button: 1 });
-    } else {
-      await fetch('/api/input', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, x, y, origW, origH })
-      });
-    }
-    log(`Click (${x}, ${y})`);
-  } catch (e) { log('Click err: ' + e); }
+    if (isTauri) await invoke('remote_click', { x, y, button: 1 });
+    else await fetch('/api/input', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, x, y, origW, origH })
+    });
+    log(`远程点击 (${x}, ${y})`);
+  } catch (e) { toast('点击发送失败: ' + e, 'err'); }
 });
 
 $('btnSendText').onclick = async () => {
@@ -319,11 +807,13 @@ $('btnSendText').onclick = async () => {
   if (!text) return;
   if (isTauri) {
     await invoke('remote_type', { text });
-    log(`Typed ${text.length} chars`);
+    $('typeInput').value = '';
+    toast('已发送文本', 'ok');
   } else {
-    log('浏览器快速模式请使用剪贴板推送或 Tauri 桌面端输入文本');
+    toast('浏览器模式请在「剪贴板与运维」推送文本');
   }
 };
+$('typeInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnSendText').click(); });
 
 $('btnClipGet').onclick = async () => {
   try {
@@ -331,26 +821,23 @@ $('btnClipGet').onclick = async () => {
       ? await invoke('remote_clipboard_get')
       : (await (await fetch('/api/clipboard', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'get' })
+          body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, action: 'get' })
         })).json()).text;
     $('clipBox').value = txt || '';
-    log('已拉取远端剪贴板');
-  } catch (e) { log('剪贴板错误: ' + e); }
+    toast('已拉取远端剪贴板', 'ok');
+  } catch (e) { toast('剪贴板错误: ' + e, 'err'); }
 };
 
 $('btnClipSet').onclick = async () => {
   try {
     const text = $('clipBox').value;
-    if (isTauri) {
-      await invoke('remote_clipboard_set', { text });
-    } else {
-      await fetch('/api/clipboard', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'set', text })
-      });
-    }
-    log('已推送剪贴板');
-  } catch (e) { log('剪贴板错误: ' + e); }
+    if (isTauri) await invoke('remote_clipboard_set', { text });
+    else await fetch('/api/clipboard', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, action: 'set', text })
+    });
+    toast('已推送到远端剪贴板', 'ok');
+  } catch (e) { toast('剪贴板错误: ' + e, 'err'); }
 };
 
 $('btnListDir').onclick = async () => {
@@ -359,7 +846,7 @@ $('btnListDir').onclick = async () => {
       ? await invoke('remote_list_dir', { remotePath: $('dirPath').value })
       : await (await fetch('/api/files', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'list', remotePath: $('dirPath').value })
+          body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, action: 'list', remotePath: $('dirPath').value })
         })).text();
     const res = JSON.parse(raw);
     const box = $('fileList');
@@ -367,12 +854,12 @@ $('btnListDir').onclick = async () => {
     if (!res.ok) { box.textContent = res.error; return; }
     for (const f of res.entries || []) {
       const div = document.createElement('div');
-      div.className = 'file-item';
-      div.innerHTML = `<span>${f.isDir ? '📁 ' : '📄 '}${f.name}</span><span style="color:var(--muted)">${f.isDir ? 'DIR' : f.size + ' B'}</span>`;
+      div.className = 'file-row';
+      div.innerHTML = `<span>${f.isDir ? '📁 ' : '📄 '}${f.name}</span><span style="color:var(--muted)">${f.isDir ? '文件夹' : f.size + ' B'}</span>`;
       box.appendChild(div);
     }
-    if (!res.entries || res.entries.length === 0) box.textContent = '(空目录)';
-  } catch (e) { log('列目录失败: ' + e); }
+    if (!res.entries || res.entries.length === 0) box.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:12px 0">(当前目录为空)</div>';
+  } catch (e) { toast('读取目录失败: ' + e, 'err'); }
 };
 
 $('btnUpload').onclick = async () => {
@@ -382,10 +869,12 @@ $('btnUpload').onclick = async () => {
       ? await invoke('remote_upload_base64', { remotePath: $('upName').value, contentBase64: b64 })
       : await (await fetch('/api/files', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, action: 'upload', remotePath: $('upName').value, contentBase64: b64 })
+          body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, action: 'upload', remotePath: $('upName').value, contentBase64: b64 })
         })).text();
-    log('上传结果: ' + raw);
-  } catch (e) { log('上传失败: ' + e); }
+    const res = JSON.parse(raw);
+    if (res.ok) { toast(`上传成功 (${res.bytes} B, SHA-256 已校验)`, 'ok'); $('btnListDir').click(); }
+    else toast('上传被拦截: ' + res.error, 'err');
+  } catch (e) { toast('上传失败: ' + e, 'err'); }
 };
 
 $('btnExec').onclick = async () => {
@@ -394,9 +883,10 @@ $('btnExec').onclick = async () => {
       ? await invoke('remote_exec_guarded', { command: $('execCmd').value })
       : await (await fetch('/api/exec', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ deviceId: $('connDevId').value, token: $('connToken').value, command: $('execCmd').value })
+          body: JSON.stringify({ deviceId: $('connDevId').value.replace(/\s+/g, ''), token: $('connToken').value, command: $('execCmd').value })
         })).text();
-    $('execOut').textContent = raw;
+    const res = JSON.parse(raw);
+    $('execOut').textContent = res.ok ? (res.stdout || '(无输出)') : `[拦截/错误] ${res.error}`;
   } catch (e) { $('execOut').textContent = 'Error: ' + e; }
 };
 

@@ -84,8 +84,12 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
-    pub async fn start(cfg: HostConfig) -> Result<Self, String> {
-        std::fs::create_dir_all(&cfg.file_root).map_err(|e| e.to_string())?;
+    pub async fn start(mut cfg: HostConfig) -> Result<Self, String> {
+        if cfg.file_root.as_os_str().is_empty() || cfg.file_root.is_relative() {
+            cfg.file_root = std::env::temp_dir().join("CopyToDesk").join("shared-files");
+        }
+        std::fs::create_dir_all(&cfg.file_root)
+            .map_err(|e| format!("create file_root {:?}: {}", cfg.file_root, e))?;
         let mut capturer = create_capturer(cfg.force_synthetic);
         let (width, height) = capturer.dimensions();
         let capture_backend = capturer.backend_name().to_string();

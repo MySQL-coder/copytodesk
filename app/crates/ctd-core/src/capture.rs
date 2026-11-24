@@ -104,8 +104,11 @@ impl NativeXcapCapturer {
             .into_iter()
             .find(|m| m.is_primary())
             .or_else(|| xcap::Monitor::all().ok()?.into_iter().next())?;
-        let width = monitor.width();
-        let height = monitor.height();
+        // Probe actual captured image dimensions so High-DPI Windows scaling always matches raw buffer size
+        let (width, height) = match monitor.capture_image() {
+            Ok(img) if img.width() > 0 && img.height() > 0 => (img.width(), img.height()),
+            _ => (monitor.width(), monitor.height()),
+        };
         if width == 0 || height == 0 {
             return None;
         }
@@ -132,10 +135,21 @@ impl ScreenCapturer for NativeXcapCapturer {
 
     fn capture_rgba(&mut self, buf: &mut Vec<u8>) -> bool {
         let Ok(monitors) = xcap::Monitor::all() else { return false };
-        let Some(monitor) = monitors.into_iter().find(|m| m.is_primary()) else { return false };
+        let Some(monitor) = monitors
+            .into_iter()
+            .find(|m| m.is_primary())
+            .or_else(|| xcap::Monitor::all().ok().and_then(|v| v.into_iter().next()))
+        else {
+            return false;
+        };
         if let Ok(img) = monitor.capture_image() {
-            let raw = img.into_raw();
-            if raw.len() == (self.width * self.height * 4) as usize {
+            let expected = (self.width * self.height * 4) as usize;
+            let raw = if img.width() == self.width && img.height() == self.height {
+                img.into_raw()
+            } else {
+                image::imageops::resize(&img, self.width, self.height, image::imageops::FilterType::Triangle).into_raw()
+            };
+            if raw.len() == expected {
                 *buf = raw;
                 return true;
             }
