@@ -209,6 +209,11 @@ impl HostHandle {
         let listener = TcpListener::bind(&cfg.bind_addr)
             .await
             .map_err(|e| format!("bind {}: {}", cfg.bind_addr, e))?;
+        if cfg.bind_addr.ends_with(":0") {
+            if let Ok(actual) = listener.local_addr() {
+                cfg.bind_addr = actual.to_string();
+            }
+        }
 
         let lan_addrs = discover_lan_endpoints(&cfg.bind_addr);
         let mut capturer = create_capturer(cfg.force_synthetic);

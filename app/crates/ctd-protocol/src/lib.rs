@@ -841,7 +841,7 @@ mod tests {
         let (h_flags, h_ct) = host_tx
             .seal(MsgType::VideoTileFrame, ChannelId::Video, frame_flags::KEY_FRAME, 2, b"tile-bytes")
             .unwrap();
-        let mut bad_hdr = FrameHeader {
+        let bad_hdr = FrameHeader {
             version: PROTOCOL_VERSION,
             msg_type: MsgType::VideoTileFrame,
             flags: h_flags,
@@ -867,6 +867,5 @@ mod tests {
         assert!(host_rx_wrong.open(&hdr2, &ct2).is_err());
 
         assert!(client_rx.open(&bad_hdr, &h_ct).is_err());
-        bad_hdr.seq_id = 2;
     }
 }

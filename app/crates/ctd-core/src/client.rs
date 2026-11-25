@@ -743,13 +743,8 @@ mod tests {
         std::fs::create_dir_all(&host_files).unwrap();
         std::fs::create_dir_all(&client_dl).unwrap();
 
-        // Pick an ephemeral loopback port
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = probe.local_addr().unwrap().to_string();
-        drop(probe);
-
         let cfg = HostConfig {
-            bind_addr: addr.clone(),
+            bind_addr: "127.0.0.1:0".into(),
             token: "p1-e2ee-secret".into(),
             device_id: "999888777".into(),
             device_secret: "owner-secret-123".into(),
@@ -764,6 +759,7 @@ mod tests {
             exec_allowlist: vec!["echo".into()],
         };
         let host = HostHandle::start(cfg).await.unwrap();
+        let addr = host.status().bind_addr;
 
         // 1. Wrong password must fail E2EE auth
         let bad_params = ConnectParams {
