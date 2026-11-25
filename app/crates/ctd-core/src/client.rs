@@ -45,7 +45,7 @@ pub struct TileItem {
     pub y: u16,
     pub w: u16,
     pub h: u16,
-    pub mime: &'static str,
+    pub mime: String,
     pub is_lossless: bool,
     pub data_base64: String,
 }
@@ -204,8 +204,8 @@ impl RemoteClient {
                                 .into_iter()
                                 .map(|t| {
                                     let (mime, is_lossless) = match t.encoding {
-                                        TileEncoding::PngLossless => ("image/png", true),
-                                        _ => ("image/jpeg", false),
+                                        TileEncoding::PngLossless => ("image/png".to_string(), true),
+                                        _ => ("image/jpeg".to_string(), false),
                                     };
                                     TileItem {
                                         x: t.x,
