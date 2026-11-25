@@ -194,8 +194,17 @@ struct SharedState {
     stream_max_w: AtomicU32,
     stream_quality: AtomicU8,
     running: AtomicBool,
+    cap_thread: std::sync::OnceLock<std::thread::Thread>,
     stop_notify: Notify,
     kick_notify: Notify,
+}
+
+impl SharedState {
+    fn wake_capturer(&self) {
+        if let Some(t) = self.cap_thread.get() {
+            t.unpark();
+        }
+    }
 }
 
 pub struct HostHandle {
@@ -282,13 +291,14 @@ impl HostHandle {
             cursor_tx,
             force_keyframe: AtomicBool::new(true),
             running: AtomicBool::new(true),
+            cap_thread: std::sync::OnceLock::new(),
             stop_notify: Notify::new(),
             kick_notify: Notify::new(),
         });
 
         // 1. Capture + Multi-Monitor Switch + Cursor Delta + Incremental Tile Encode loop
         let cap_state = state.clone();
-        std::thread::spawn(move || {
+        let cap_join = std::thread::spawn(move || {
             let interval = Duration::from_millis((1000 / cap_state.cfg.fps.max(1)).max(15) as u64);
             let mut cur_w = init_w;
             let mut cur_h = init_h;
@@ -397,11 +407,12 @@ impl HostHandle {
                     Duration::from_millis(250)
                 };
                 let elapsed = t0.elapsed();
-                if elapsed < target_wait {
-                    std::thread::sleep(target_wait - elapsed);
+                if elapsed < target_wait && cap_state.running.load(Ordering::Relaxed) {
+                    std::thread::park_timeout(target_wait - elapsed);
                 }
             }
         });
+        let _ = state.cap_thread.set(cap_join.thread().clone());
 
         // 2. Direct TCP accept loop
         let srv_state = state.clone();
@@ -475,6 +486,7 @@ impl HostHandle {
 
     pub fn stop(&self) {
         self.state.running.store(false, Ordering::Release);
+        self.state.wake_capturer();
         self.state.kick_notify.notify_waiters();
         self.state.stop_notify.notify_waiters();
     }
@@ -715,6 +727,7 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
     let mut rx_vid = state.frame_tx.subscribe();
     let mut rx_cur = state.cursor_tx.subscribe();
     state.force_keyframe.store(true, Ordering::Release);
+    state.wake_capturer();
 
     let wr_push = wr.clone();
     let st_push = state.clone();
@@ -770,6 +783,7 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                     state.stream_quality.store(q, Ordering::Relaxed);
                 }
                 state.force_keyframe.store(true, Ordering::Release);
+                state.wake_capturer();
             }
             MsgType::MonitorSelect if payload.len() >= 2 => {
                 let target_idx = u16::from_le_bytes([payload[0], payload[1]]);
@@ -780,12 +794,14 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                     .unwrap_or_default();
                 let resp = if let Some(found) = monitors.iter().find(|m| m.index == target_idx) {
                     state.active_monitor.store(target_idx, Ordering::Release);
+                    state.width.store(found.width, Ordering::Release);
+                    state.height.store(found.height, Ordering::Release);
                     state.injector.set_target_monitor(found);
                     state
                         .requested_monitor
                         .store(target_idx as i32, Ordering::Release);
-                    // Wait briefly (up to 60ms) so capture thread updates actual pixel width/height
-                    for _ in 0..6 {
+                    state.wake_capturer();
+                    for _ in 0..25 {
                         if state.requested_monitor.load(Ordering::Acquire) < 0 {
                             break;
                         }
