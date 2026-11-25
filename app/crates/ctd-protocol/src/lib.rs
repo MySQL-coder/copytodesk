@@ -388,7 +388,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     Ok((hdr, payload))
 }
 
-/// Performs the line-based `CONNECT <deviceId>\n` -> `OK TUNNEL\n` handshake against `signaling-relay.mjs`.
+/// Performs the line-based `CONNECT <deviceId>\n` -> `OK TUNNEL\n` handshake against `signaling-relay`.
 pub async fn connect_via_relay(
     relay_addr: &str,
     device_id: &str,
@@ -406,6 +406,35 @@ pub async fn connect_via_relay(
         return Err(ProtocolError::RelayHandshake(line.trim().to_string()));
     }
     Ok(reader.into_inner())
+}
+
+/// Queries `LOOKUP <deviceId>\n` -> `OK LAN <ip1:port,ip2:port>\n` for fast LAN-first P2P direct race.
+pub async fn lookup_lan_via_relay(relay_addr: &str, device_id: &str) -> Vec<String> {
+    let fut = async {
+        let stream = tokio::net::TcpStream::connect(relay_addr).await.ok()?;
+        let _ = stream.set_nodelay(true);
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(format!("LOOKUP {device_id}\n").as_bytes())
+            .await
+            .ok()?;
+        let mut line = String::new();
+        reader.read_line(&mut line).await.ok()?;
+        let rest = line.trim().strip_prefix("OK LAN")?;
+        let addrs: Vec<String> = rest
+            .trim()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Some(addrs)
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(1200), fut)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

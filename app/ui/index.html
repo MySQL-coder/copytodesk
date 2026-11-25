@@ -327,7 +327,7 @@
             <button id="btnCopyCode" class="icon-btn" title="复制设备代码">📋</button>
           </div>
           <div class="code-value selectable" id="displayCode">888 100 200</div>
-          <div style="font-size:11.5px;color:var(--text-2)" id="hostAddrHint">直连监听：127.0.0.1:19800（可在高级设置修改中继）</div>
+          <div style="font-size:11.5px;color:var(--text-2)" id="hostAddrHint">局域网直连监听：0.0.0.0:19800（同局域网自动直连）</div>
         </div>
 
         <div class="pwd-box">
@@ -385,15 +385,17 @@
   <section id="tab-viewer" class="tab-page viewer-tab">
     <div class="viewer-bar">
       <strong style="font-size:13px">远程桌面</strong>
+      <span id="routeBadge" class="pill-dark" style="display:none;color:#86efac"></span>
       <span id="hud" class="pill-dark">未连接</span>
       <select id="viewerQuality" style="height:30px;border-radius:7px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.15);padding:0 8px;font-size:12px">
         <option value="960:60" style="color:#000">流畅 (960p)</option>
         <option value="1280:68" selected style="color:#000">均衡 (1280p)</option>
         <option value="1920:78" style="color:#000">高清 (1920p)</option>
+        <option value="0:82" style="color:#000">原画 (无缩放)</option>
       </select>
       <input id="typeInput" placeholder="输入文本回车发送到远端..." />
       <button id="btnSendText" class="btn sm">发送文本</button>
-      <button id="btnSnap" class="btn sm ghost" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.15)">刷新画面</button>
+      <button id="btnSnap" class="btn sm ghost" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.15)">强制关键帧</button>
       <button id="btnDisconnect" class="btn sm danger" style="margin-left:auto">断开连接</button>
     </div>
     <div class="viewer-stage">
@@ -474,7 +476,7 @@
     <div class="card">
       <div class="card-header"><div class="card-title">网络与被控参数</div></div>
       <div class="two-col">
-        <div class="field"><label>本机监听地址 (Bind)</label><input id="hostBind" class="input" value="127.0.0.1:19800" /></div>
+        <div class="field"><label>本机监听地址 (0.0.0.0 允许同局域网 P2P 自动直连)</label><input id="hostBind" class="input" value="0.0.0.0:19800" /></div>
         <div class="field"><label>本机设备代码 (Device ID)</label><input id="hostDevId" class="input" value="888100200" /></div>
         <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="38.34.13.214:19901" placeholder="例如 38.34.13.214:19901" /></div>
         <div class="field" style="display:flex;flex-direction:column;justify-content:flex-end;gap:8px">

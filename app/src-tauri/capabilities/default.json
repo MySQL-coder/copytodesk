@@ -4,6 +4,7 @@
   "description": "Default desktop capabilities for CopyToDesk",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:event:default"
   ]
 }

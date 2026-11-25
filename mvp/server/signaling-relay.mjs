@@ -128,25 +128,60 @@ const relayServer = net.createServer(async (sock) => {
     const parts = line.trim().split(/\s+/);
     const cmd = (parts[0] || '').toUpperCase();
 
+    if (cmd === 'LOOKUP' && parts[1]) {
+      const hostInfo = hosts.get(parts[1]);
+      if (!hostInfo || hostInfo.controlSock.destroyed) {
+        sock.write('ERR OFFLINE\n');
+      } else {
+        sock.write(`OK LAN ${(hostInfo.lanAddrs || []).join(',')}\n`);
+      }
+      sock.end();
+      return;
+    }
+
     if (cmd === 'REGISTER' && parts[1]) {
       const deviceId = parts[1];
-      const name = parts.slice(2).join(' ') || 'Host';
+      let lanAddrs = [];
+      const nameParts = [];
+      for (const tok of parts.slice(2)) {
+        if (tok.toUpperCase().startsWith('LAN=')) {
+          lanAddrs = tok.slice(4).split(',').map((s) => s.trim()).filter(Boolean);
+        } else {
+          nameParts.push(tok);
+        }
+      }
+      const name = nameParts.join(' ') || 'Host';
       const old = hosts.get(deviceId);
       if (old && !old.controlSock.destroyed) old.controlSock.destroy();
 
+      const nowIso = new Date().toISOString();
       const info = {
         deviceId,
         name,
+        lanAddrs,
         controlSock: sock,
-        registeredAt: new Date().toISOString(),
+        registeredAt: nowIso,
+        lastSeenAt: nowIso,
         remoteAddr: sock.remoteAddress || '',
       };
       hosts.set(deviceId, info);
       sock.write(`OK REGISTERED ${deviceId}\n`);
-      console.log(`[Relay] Host registered: deviceId=${deviceId} name=${name}`);
+      console.log(`[Relay] Host registered: deviceId=${deviceId} name=${name} lan=${lanAddrs.join(',')}`);
 
-      // Keep control channel alive (ignore heartbeats)
-      sock.on('data', () => {});
+      // Respond to PING keepalive lines and detect dead sockets via 70s idle timeout
+      sock.setTimeout(70000);
+      sock.on('timeout', () => sock.destroy());
+      let hbBuf = '';
+      sock.on('data', (chunk) => {
+        info.lastSeenAt = new Date().toISOString();
+        hbBuf += chunk.toString('utf8');
+        let idx;
+        while ((idx = hbBuf.indexOf('\n')) >= 0) {
+          const l = hbBuf.slice(0, idx).trim().toUpperCase();
+          hbBuf = hbBuf.slice(idx + 1);
+          if (l === 'PING' && !sock.destroyed) sock.write('PONG\n');
+        }
+      });
       sock.on('close', () => {
         if (hosts.get(deviceId) === info) {
           hosts.delete(deviceId);

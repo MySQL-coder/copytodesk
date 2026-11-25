@@ -93,9 +93,28 @@ async def handle_relay_client(reader: asyncio.StreamReader, writer: asyncio.Stre
             return
         cmd = parts[0].upper()
 
+        if cmd == "LOOKUP" and len(parts) >= 2:
+            device_id = parts[1]
+            host_info = hosts.get(device_id)
+            if not host_info or host_info["writer"].is_closing():
+                writer.write(b"ERR OFFLINE\n")
+            else:
+                lan_csv = ",".join(host_info.get("lanAddrs", []))
+                writer.write(f"OK LAN {lan_csv}\n".encode("utf-8"))
+            await writer.drain()
+            writer.close()
+            return
+
         if cmd == "REGISTER" and len(parts) >= 2:
             device_id = parts[1]
-            name = " ".join(parts[2:]) if len(parts) > 2 else "Host"
+            lan_addrs = []
+            name_parts = []
+            for tok in parts[2:]:
+                if tok.upper().startswith("LAN="):
+                    lan_addrs = [x.strip() for x in tok[4:].split(",") if x.strip()]
+                else:
+                    name_parts.append(tok)
+            name = " ".join(name_parts) if name_parts else "Host"
             old = hosts.get(device_id)
             if old:
                 try:
@@ -103,22 +122,30 @@ async def handle_relay_client(reader: asyncio.StreamReader, writer: asyncio.Stre
                 except Exception:
                     pass
             peer = writer.get_extra_info("peername")
+            now_iso = datetime.datetime.utcnow().isoformat() + "Z"
             info = {
                 "deviceId": device_id,
                 "name": name,
+                "lanAddrs": lan_addrs,
                 "writer": writer,
-                "registeredAt": datetime.datetime.utcnow().isoformat() + "Z",
+                "registeredAt": now_iso,
+                "lastSeenAt": now_iso,
                 "remoteAddr": str(peer[0]) if peer else "",
             }
             hosts[device_id] = info
             writer.write(f"OK REGISTERED {device_id}\n".encode("utf-8"))
             await writer.drain()
-            print(f"[Relay] Host registered: deviceId={device_id} name={name}", flush=True)
+            print(f"[Relay] Host registered: deviceId={device_id} name={name} lan={lan_addrs}", flush=True)
             try:
                 while True:
-                    chunk = await reader.read(1024)
-                    if not chunk:
+                    hb_raw = await asyncio.wait_for(reader.readline(), timeout=70.0)
+                    if not hb_raw:
                         break
+                    hb_cmd = hb_raw.decode("utf-8", errors="replace").strip().upper()
+                    info["lastSeenAt"] = datetime.datetime.utcnow().isoformat() + "Z"
+                    if hb_cmd == "PING":
+                        writer.write(b"PONG\n")
+                        await writer.drain()
             except Exception:
                 pass
             finally:
@@ -282,7 +309,16 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             data = open(p, "rb").read() if os.path.exists(p) else b""
             writer.write(http_response("200 OK", "application/javascript; charset=utf-8", data))
         elif method == "GET" and path == "/api/devices":
-            devs = [{"deviceId": h["deviceId"], "name": h["name"], "registeredAt": h["registeredAt"]} for h in hosts.values()]
+            devs = [
+                {
+                    "deviceId": h["deviceId"],
+                    "name": h["name"],
+                    "lanAddrs": h.get("lanAddrs", []),
+                    "registeredAt": h["registeredAt"],
+                    "lastSeenAt": h.get("lastSeenAt", h["registeredAt"]),
+                }
+                for h in hosts.values()
+            ]
             writer.write(http_response("200 OK", "application/json", json.dumps({"devices": devs}).encode("utf-8")))
         elif method == "GET" and path == "/api/health":
             out = {"status": "ok", "onlineHosts": len(hosts), **stats}
