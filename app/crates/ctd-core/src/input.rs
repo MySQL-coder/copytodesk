@@ -1,16 +1,17 @@
-//! Cross-platform native input injection:
-//! - Windows: Win32 `SendInput` (absolute mouse, wheel, VK + Unicode keys)
-//! - macOS: CoreGraphics `CGEvent` (absolute mouse move/click/drag/scroll + Unicode/keyCode keys)
-//!   Note: macOS requires granting Accessibility (辅助功能) permission to CopyToDesk.
-//! - Linux / Safe mode: `DryRunAuditInjector`
+//! Cross-platform native input injection with multi-monitor coordinate mapping (v0.5.0 P2):
+//! - Windows: Win32 `SendInput` mapped to active monitor within `VIRTUALDESK`
+//! - macOS: CoreGraphics `CGEvent` mapped to active `CGDisplayBounds` + `CGEventSetFlags`
+//! - Linux: Runtime `dlopen("libX11.so.6" + "libXtst.so.6")` native `XTest` injection (zero linker deps)
+//! - Safe / Headless fallback: `DryRunAuditInjector`
 
-use ctd_protocol::{KeyEventPacket, MouseEventPacket};
+use ctd_protocol::{KeyEventPacket, MonitorInfo, MouseEventPacket};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub trait InputInjector: Send + Sync {
     fn backend_name(&self) -> &'static str;
     fn total_events(&self) -> u64;
+    fn set_target_monitor(&self, mon: &MonitorInfo);
     fn inject_mouse(&self, ev: MouseEventPacket);
     fn inject_key(&self, ev: KeyEventPacket);
 }
@@ -29,6 +30,8 @@ impl InputInjector for DryRunAuditInjector {
         self.count.load(Ordering::Relaxed)
     }
 
+    fn set_target_monitor(&self, _mon: &MonitorInfo) {}
+
     fn inject_mouse(&self, _ev: MouseEventPacket) {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
@@ -41,6 +44,7 @@ impl InputInjector for DryRunAuditInjector {
 #[cfg(target_os = "windows")]
 mod win_input {
     use super::*;
+    use std::sync::atomic::{AtomicI32, AtomicU32};
 
     const INPUT_MOUSE: u32 = 0;
     const INPUT_KEYBOARD: u32 = 1;
@@ -57,6 +61,11 @@ mod win_input {
     const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
     const KEYEVENTF_KEYUP: u32 = 0x0002;
     const KEYEVENTF_UNICODE: u32 = 0x0004;
+
+    const SM_XVIRTUALSCREEN: i32 = 76;
+    const SM_YVIRTUALSCREEN: i32 = 77;
+    const SM_CXVIRTUALSCREEN: i32 = 78;
+    const SM_CYVIRTUALSCREEN: i32 = 79;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -105,11 +114,41 @@ mod win_input {
     #[link(name = "user32")]
     extern "system" {
         fn SendInput(c_inputs: u32, p_inputs: *const Input, cb_size: i32) -> u32;
+        fn GetSystemMetrics(n_index: i32) -> i32;
     }
 
     #[derive(Default)]
     pub struct Win32SendInputInjector {
         count: AtomicU64,
+        mon_x: AtomicI32,
+        mon_y: AtomicI32,
+        mon_w: AtomicU32,
+        mon_h: AtomicU32,
+    }
+
+    impl Win32SendInputInjector {
+        fn map_to_virtual_desk(&self, norm_x: u16, norm_y: u16) -> (i32, i32) {
+            let mw = self.mon_w.load(Ordering::Relaxed);
+            let mh = self.mon_h.load(Ordering::Relaxed);
+            if mw == 0 || mh == 0 {
+                return (norm_x as i32, norm_y as i32);
+            }
+            unsafe {
+                let vx = GetSystemMetrics(SM_XVIRTUALSCREEN) as i64;
+                let vy = GetSystemMetrics(SM_YVIRTUALSCREEN) as i64;
+                let vw = (GetSystemMetrics(SM_CXVIRTUALSCREEN) as i64).max(1);
+                let vh = (GetSystemMetrics(SM_CYVIRTUALSCREEN) as i64).max(1);
+
+                let mx = self.mon_x.load(Ordering::Relaxed) as i64;
+                let my = self.mon_y.load(Ordering::Relaxed) as i64;
+                let px = mx + ((norm_x as i64) * (mw.saturating_sub(1) as i64)) / 65535;
+                let py = my + ((norm_y as i64) * (mh.saturating_sub(1) as i64)) / 65535;
+
+                let abs_x = (((px - vx) * 65535) / vw.saturating_sub(1).max(1)).clamp(0, 65535);
+                let abs_y = (((py - vy) * 65535) / vh.saturating_sub(1).max(1)).clamp(0, 65535);
+                (abs_x as i32, abs_y as i32)
+            }
+        }
     }
 
     impl InputInjector for Win32SendInputInjector {
@@ -119,6 +158,13 @@ mod win_input {
 
         fn total_events(&self) -> u64 {
             self.count.load(Ordering::Relaxed)
+        }
+
+        fn set_target_monitor(&self, mon: &MonitorInfo) {
+            self.mon_x.store(mon.x, Ordering::Relaxed);
+            self.mon_y.store(mon.y, Ordering::Relaxed);
+            self.mon_w.store(mon.width, Ordering::Relaxed);
+            self.mon_h.store(mon.height, Ordering::Relaxed);
         }
 
         fn inject_mouse(&self, ev: MouseEventPacket) {
@@ -151,12 +197,13 @@ mod win_input {
                 }
                 _ => {}
             }
+            let (dx, dy) = self.map_to_virtual_desk(ev.norm_x, ev.norm_y);
             let inp = Input {
                 input_type: INPUT_MOUSE,
                 u: InputUnion {
                     mi: MouseInput {
-                        dx: ev.norm_x as i32,
-                        dy: ev.norm_y as i32,
+                        dx,
+                        dy,
                         mouse_data,
                         dw_flags: flags,
                         time: 0,
@@ -233,13 +280,27 @@ mod win_input {
 mod mac_input {
     use super::*;
     use std::ffi::c_void;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
 
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct CGPoint {
         x: f64,
         y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
     }
 
     const K_CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
@@ -260,8 +321,12 @@ mod mac_input {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGMainDisplayID() -> u32;
-        fn CGDisplayPixelsWide(display: u32) -> usize;
-        fn CGDisplayPixelsHigh(display: u32) -> usize;
+        fn CGGetActiveDisplayList(
+            max_displays: u32,
+            active_displays: *mut u32,
+            display_count: *mut u32,
+        ) -> i32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
         fn CGEventCreateMouseEvent(
             source: *const c_void,
             mouse_type: u32,
@@ -299,25 +364,33 @@ mod mac_input {
         count: AtomicU64,
         left_down: AtomicBool,
         mod_flags: AtomicU64,
+        mon_index: AtomicU32,
     }
 
     impl MacCoreGraphicsInjector {
         pub fn new() -> Self {
-            // Proactively trigger macOS Screen Recording permission prompt if not granted yet
             unsafe {
                 let _ = CGRequestScreenCaptureAccess();
             }
             Self::default()
         }
 
-        fn to_point(norm_x: u16, norm_y: u16) -> CGPoint {
+        fn to_point(&self, norm_x: u16, norm_y: u16) -> CGPoint {
             unsafe {
-                let disp = CGMainDisplayID();
-                let w = CGDisplayPixelsWide(disp).max(1) as f64;
-                let h = CGDisplayPixelsHigh(disp).max(1) as f64;
+                let idx = self.mon_index.load(Ordering::Relaxed);
+                let mut ids = [0u32; 16];
+                let mut cnt = 0u32;
+                let disp = if CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut cnt) == 0
+                    && idx < cnt
+                {
+                    ids[idx as usize]
+                } else {
+                    CGMainDisplayID()
+                };
+                let b = CGDisplayBounds(disp);
                 CGPoint {
-                    x: (norm_x as f64 / 65535.0) * w,
-                    y: (norm_y as f64 / 65535.0) * h,
+                    x: b.origin.x + (norm_x as f64 / 65535.0) * b.size.width.max(1.0),
+                    y: b.origin.y + (norm_y as f64 / 65535.0) * b.size.height.max(1.0),
                 }
             }
         }
@@ -325,58 +398,64 @@ mod mac_input {
 
     fn win_vk_to_mac_keycode(vk: u16) -> Option<u16> {
         match vk {
-            0x08 => Some(51),  // Backspace / Delete
-            0x09 => Some(48),  // Tab
-            0x0D => Some(36),  // Return
-            0x1B => Some(53),  // Escape
-            0x20 => Some(49),  // Space
-            0x25 => Some(123), // Left
-            0x26 => Some(126), // Up
-            0x27 => Some(124), // Right
-            0x28 => Some(125), // Down
-            0x2E => Some(117), // Forward Delete
-            0x10 => Some(56),  // Shift
-            0x11 => Some(59),  // Control
-            0x12 => Some(58),  // Option/Alt
+            0x08 => Some(51),        // Backspace / Delete
+            0x09 => Some(48),        // Tab
+            0x0D => Some(36),        // Return
+            0x1B => Some(53),        // Escape
+            0x20 => Some(49),        // Space
+            0x25 => Some(123),       // Left
+            0x26 => Some(126),       // Up
+            0x27 => Some(124),       // Right
+            0x28 => Some(125),       // Down
+            0x2E => Some(117),       // Forward Delete
+            0x10 => Some(56),        // Shift
+            0x11 => Some(59),        // Control
+            0x12 => Some(58),        // Option/Alt
             0x5B | 0x5C => Some(55), // Command
-            0x41 => Some(0),  // A
-            0x42 => Some(11), // B
-            0x43 => Some(8),  // C
-            0x44 => Some(2),  // D
-            0x45 => Some(14), // E
-            0x46 => Some(3),  // F
-            0x47 => Some(5),  // G
-            0x48 => Some(4),  // H
-            0x49 => Some(34), // I
-            0x4A => Some(38), // J
-            0x4B => Some(40), // K
-            0x4C => Some(37), // L
-            0x4D => Some(46), // M
-            0x4E => Some(45), // N
-            0x4F => Some(31), // O
-            0x50 => Some(35), // P
-            0x51 => Some(12), // Q
-            0x52 => Some(15), // R
-            0x53 => Some(1),  // S
-            0x54 => Some(17), // T
-            0x55 => Some(32), // U
-            0x56 => Some(9),  // V
-            0x57 => Some(13), // W
-            0x58 => Some(7),  // X
-            0x59 => Some(16), // Y
-            0x5A => Some(6),  // Z
-            0x30 => Some(29), // 0
-            0x31 => Some(18), // 1
-            0x32 => Some(19), // 2
-            0x33 => Some(20), // 3
-            0x34 => Some(21), // 4
-            0x35 => Some(23), // 5
-            0x36 => Some(22), // 6
-            0x37 => Some(26), // 7
-            0x38 => Some(28), // 8
-            0x39 => Some(25), // 9
-            0xBD => Some(27), // -
-            0xBB => Some(24), // =
+            0x41 => Some(0),         // A
+            0x42 => Some(11),        // B
+            0x43 => Some(8),         // C
+            0x44 => Some(2),         // D
+            0x45 => Some(14),        // E
+            0x46 => Some(3),         // F
+            0x47 => Some(5),         // G
+            0x48 => Some(4),         // H
+            0x49 => Some(34),        // I
+            0x4A => Some(38),        // J
+            0x4B => Some(40),        // K
+            0x4C => Some(37),        // L
+            0x4D => Some(46),        // M
+            0x4E => Some(45),        // N
+            0x4F => Some(31),        // O
+            0x50 => Some(35),        // P
+            0x51 => Some(12),        // Q
+            0x52 => Some(15),        // R
+            0x53 => Some(1),         // S
+            0x54 => Some(17),        // T
+            0x55 => Some(32),        // U
+            0x56 => Some(9),         // V
+            0x57 => Some(13),        // W
+            0x58 => Some(7),         // X
+            0x59 => Some(16),        // Y
+            0x5A => Some(6),         // Z
+            0x30 => Some(29),        // 0
+            0x31 => Some(18),        // 1
+            0x32 => Some(19),        // 2
+            0x33 => Some(20),        // 3
+            0x34 => Some(21),        // 4
+            0x35 => Some(23),        // 5
+            0x36 => Some(22),        // 6
+            0x37 => Some(26),        // 7
+            0x38 => Some(28),        // 8
+            0x39 => Some(25),        // 9
+            0xBD => Some(27),        // -
+            0xBB => Some(24),        // =
+            0x70 => Some(122),       // F1
+            0x71 => Some(120),       // F2
+            0x72 => Some(99),        // F3 (Mission Control)
+            0x73 => Some(118),       // F4
+            0x74 => Some(96),        // F5
+            0x7A => Some(103),       // F11 (Show Desktop)
             _ => None,
         }
     }
@@ -390,14 +469,25 @@ mod mac_input {
             self.count.load(Ordering::Relaxed)
         }
 
+        fn set_target_monitor(&self, mon: &MonitorInfo) {
+            self.mon_index.store(mon.index as u32, Ordering::Relaxed);
+        }
+
         fn inject_mouse(&self, ev: MouseEventPacket) {
             self.count.fetch_add(1, Ordering::Relaxed);
-            let pt = Self::to_point(ev.norm_x, ev.norm_y);
+            let pt = self.to_point(ev.norm_x, ev.norm_y);
             unsafe {
                 if ev.action == 3 {
-                    // Scroll wheel (1 = line units)
                     let lines = (ev.wheel_delta as i32) / 40;
-                    let delta = if lines == 0 { if ev.wheel_delta > 0 { 1 } else { -1 } } else { lines };
+                    let delta = if lines == 0 {
+                        if ev.wheel_delta > 0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    } else {
+                        lines
+                    };
                     let e = CGEventCreateScrollWheelEvent(std::ptr::null(), 1, 1, delta);
                     if !e.is_null() {
                         CGEventPost(K_CG_HID_EVENT_TAP, e);
@@ -496,12 +586,196 @@ mod mac_input {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod linux_input {
+    use super::*;
+    use std::ffi::{c_char, c_int, c_uchar, c_uint, c_ulong, c_void};
+    use std::sync::atomic::{AtomicI32, AtomicU32};
+    use std::sync::Mutex;
+
+    extern "C" {
+        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    pub struct LinuxXTestInjector {
+        count: AtomicU64,
+        dpy: Mutex<usize>,
+        mon_x: AtomicI32,
+        mon_y: AtomicI32,
+        mon_w: AtomicU32,
+        mon_h: AtomicU32,
+        fake_motion: unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_ulong) -> c_int,
+        fake_button: unsafe extern "C" fn(*mut c_void, c_uint, c_int, c_ulong) -> c_int,
+        fake_key: unsafe extern "C" fn(*mut c_void, c_uint, c_int, c_ulong) -> c_int,
+        keysym_to_kc: unsafe extern "C" fn(*mut c_void, c_ulong) -> c_uchar,
+        flush: unsafe extern "C" fn(*mut c_void) -> c_int,
+    }
+
+    impl LinuxXTestInjector {
+        pub fn try_new() -> Option<Self> {
+            unsafe {
+                if std::env::var("DISPLAY").unwrap_or_default().is_empty() {
+                    return None;
+                }
+                let x11 = dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, 1);
+                let xtst = dlopen(b"libXtst.so.6\0".as_ptr() as *const c_char, 1);
+                if x11.is_null() || xtst.is_null() {
+                    return None;
+                }
+                let open_sym = dlsym(x11, b"XOpenDisplay\0".as_ptr() as *const c_char);
+                let flush_sym = dlsym(x11, b"XFlush\0".as_ptr() as *const c_char);
+                let k2k_sym = dlsym(x11, b"XKeysymToKeycode\0".as_ptr() as *const c_char);
+                let motion_sym = dlsym(xtst, b"XTestFakeMotionEvent\0".as_ptr() as *const c_char);
+                let btn_sym = dlsym(xtst, b"XTestFakeButtonEvent\0".as_ptr() as *const c_char);
+                let key_sym = dlsym(xtst, b"XTestFakeKeyEvent\0".as_ptr() as *const c_char);
+                if open_sym.is_null()
+                    || flush_sym.is_null()
+                    || k2k_sym.is_null()
+                    || motion_sym.is_null()
+                    || btn_sym.is_null()
+                    || key_sym.is_null()
+                {
+                    return None;
+                }
+                let open_fn: unsafe extern "C" fn(*const c_char) -> *mut c_void =
+                    std::mem::transmute(open_sym);
+                let dpy = open_fn(std::ptr::null());
+                if dpy.is_null() {
+                    return None;
+                }
+                Some(Self {
+                    count: AtomicU64::new(0),
+                    dpy: Mutex::new(dpy as usize),
+                    mon_x: AtomicI32::new(0),
+                    mon_y: AtomicI32::new(0),
+                    mon_w: AtomicU32::new(1920),
+                    mon_h: AtomicU32::new(1080),
+                    fake_motion: std::mem::transmute(motion_sym),
+                    fake_button: std::mem::transmute(btn_sym),
+                    fake_key: std::mem::transmute(key_sym),
+                    keysym_to_kc: std::mem::transmute(k2k_sym),
+                    flush: std::mem::transmute(flush_sym),
+                })
+            }
+        }
+    }
+
+    fn vk_to_x11_keysym(vk: u16) -> Option<c_ulong> {
+        match vk {
+            0x08 => Some(0xff08), // BackSpace
+            0x09 => Some(0xff09), // Tab
+            0x0D => Some(0xff0d), // Return
+            0x1B => Some(0xff1b), // Escape
+            0x20 => Some(0x0020), // space
+            0x25 => Some(0xff51), // Left
+            0x26 => Some(0xff52), // Up
+            0x27 => Some(0xff53), // Right
+            0x28 => Some(0xff54), // Down
+            0x2E => Some(0xffff), // Delete
+            0x10 => Some(0xffe1), // Shift_L
+            0x11 => Some(0xffe3), // Control_L
+            0x12 => Some(0xffe9), // Alt_L
+            0x5B | 0x5C => Some(0xffeb), // Super_L
+            0x30..=0x39 => Some(vk as c_ulong),
+            0x41..=0x5A => Some((vk as c_ulong) + 32), // lowercase ASCII keysym
+            0x70..=0x7B => Some(0xffbe + ((vk - 0x70) as c_ulong)), // F1..F12
+            _ => None,
+        }
+    }
+
+    impl InputInjector for LinuxXTestInjector {
+        fn backend_name(&self) -> &'static str {
+            "Linux-X11-XTest"
+        }
+
+        fn total_events(&self) -> u64 {
+            self.count.load(Ordering::Relaxed)
+        }
+
+        fn set_target_monitor(&self, mon: &MonitorInfo) {
+            self.mon_x.store(mon.x, Ordering::Relaxed);
+            self.mon_y.store(mon.y, Ordering::Relaxed);
+            self.mon_w.store(mon.width.max(1), Ordering::Relaxed);
+            self.mon_h.store(mon.height.max(1), Ordering::Relaxed);
+        }
+
+        fn inject_mouse(&self, ev: MouseEventPacket) {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            let Ok(guard) = self.dpy.lock() else { return };
+            let dpy = *guard as *mut c_void;
+            let mx = self.mon_x.load(Ordering::Relaxed) as i64;
+            let my = self.mon_y.load(Ordering::Relaxed) as i64;
+            let mw = self.mon_w.load(Ordering::Relaxed).max(1) as i64;
+            let mh = self.mon_h.load(Ordering::Relaxed).max(1) as i64;
+            let px = (mx + ((ev.norm_x as i64) * (mw - 1)) / 65535) as c_int;
+            let py = (my + ((ev.norm_y as i64) * (mh - 1)) / 65535) as c_int;
+
+            unsafe {
+                let _ = (self.fake_motion)(dpy, -1, px, py, 0);
+                match ev.action {
+                    1 | 2 => {
+                        let is_press = if ev.action == 1 { 1 } else { 0 };
+                        let btn: c_uint = match ev.button {
+                            2 => 3, // X11 right button = 3
+                            3 => 2, // X11 middle button = 2
+                            _ => 1,
+                        };
+                        let _ = (self.fake_button)(dpy, btn, is_press, 0);
+                    }
+                    3 => {
+                        let btn: c_uint = if ev.wheel_delta >= 0 { 4 } else { 5 };
+                        let _ = (self.fake_button)(dpy, btn, 1, 0);
+                        let _ = (self.fake_button)(dpy, btn, 0, 0);
+                    }
+                    _ => {}
+                }
+                let _ = (self.flush)(dpy);
+            }
+        }
+
+        fn inject_key(&self, ev: KeyEventPacket) {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            let Ok(guard) = self.dpy.lock() else { return };
+            let dpy = *guard as *mut c_void;
+            unsafe {
+                if ev.action == 2 && ev.unicode_char > 0 {
+                    let ks: c_ulong = if ev.unicode_char <= 0x7e {
+                        ev.unicode_char as c_ulong
+                    } else {
+                        0x0100_0000 | (ev.unicode_char as c_ulong)
+                    };
+                    let kc = (self.keysym_to_kc)(dpy, ks) as c_uint;
+                    if kc != 0 {
+                        let _ = (self.fake_key)(dpy, kc, 1, 0);
+                        let _ = (self.fake_key)(dpy, kc, 0, 0);
+                        let _ = (self.flush)(dpy);
+                    }
+                    return;
+                }
+                if let Some(ks) = vk_to_x11_keysym(ev.vk) {
+                    let kc = (self.keysym_to_kc)(dpy, ks) as c_uint;
+                    if kc != 0 {
+                        let is_press = if ev.action == 0 { 1 } else { 0 };
+                        let _ = (self.fake_key)(dpy, kc, is_press, 0);
+                        let _ = (self.flush)(dpy);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn create_injector(allow_input: bool) -> Arc<dyn InputInjector> {
     if allow_input {
         #[cfg(target_os = "windows")]
         return Arc::new(win_input::Win32SendInputInjector::default());
         #[cfg(target_os = "macos")]
         return Arc::new(mac_input::MacCoreGraphicsInjector::new());
+        #[cfg(target_os = "linux")]
+        if let Some(x11) = linux_input::LinuxXTestInjector::try_new() {
+            return Arc::new(x11);
+        }
     }
     Arc::new(DryRunAuditInjector::default())
 }

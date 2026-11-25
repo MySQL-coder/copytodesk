@@ -55,6 +55,8 @@ pub enum MsgType {
     E2eeAck = 0x06,
     VideoTileFrame = 0x10,
     RequestKeyFrame = 0x11,
+    MonitorSelect = 0x12,
+    MonitorSelectAck = 0x13,
     CursorState = 0x20,
     MouseEvent = 0x30,
     KeyEvent = 0x31,
@@ -88,6 +90,8 @@ impl TryFrom<u8> for MsgType {
             0x06 => Ok(Self::E2eeAck),
             0x10 => Ok(Self::VideoTileFrame),
             0x11 => Ok(Self::RequestKeyFrame),
+            0x12 => Ok(Self::MonitorSelect),
+            0x13 => Ok(Self::MonitorSelectAck),
             0x20 => Ok(Self::CursorState),
             0x30 => Ok(Self::MouseEvent),
             0x31 => Ok(Self::KeyEvent),
@@ -403,36 +407,79 @@ impl E2eeClientHandshake {
     }
 }
 
+pub struct ServerE2eeHandshake {
+    shared_bytes: [u8; 32],
+    client_pub: [u8; 32],
+    host_pub: [u8; 32],
+    client_salt: [u8; 16],
+    host_salt: [u8; 16],
+}
+
+impl ServerE2eeHandshake {
+    pub fn begin(init_payload: &[u8]) -> Result<(Self, [u8; E2EE_HANDSHAKE_LEN]), ProtocolError> {
+        if init_payload.len() < E2EE_HANDSHAKE_LEN {
+            return Err(ProtocolError::Truncated("E2eeInit"));
+        }
+        let mut client_pub = [0u8; 32];
+        let mut client_salt = [0u8; 16];
+        client_pub.copy_from_slice(&init_payload[0..32]);
+        client_salt.copy_from_slice(&init_payload[32..48]);
+
+        let sec_bytes: [u8; 32] = rand::random();
+        let host_salt: [u8; 16] = rand::random();
+        let secret = StaticSecret::from(sec_bytes);
+        let host_pub = *PublicKey::from(&secret).as_bytes();
+
+        let peer = PublicKey::from(client_pub);
+        let shared = secret.diffie_hellman(&peer);
+
+        let mut ack_payload = [0u8; E2EE_HANDSHAKE_LEN];
+        ack_payload[0..32].copy_from_slice(&host_pub);
+        ack_payload[32..48].copy_from_slice(&host_salt);
+
+        Ok((
+            Self {
+                shared_bytes: *shared.as_bytes(),
+                client_pub,
+                host_pub,
+                client_salt,
+                host_salt,
+            },
+            ack_payload,
+        ))
+    }
+
+    pub fn try_open_first_frame(
+        &self,
+        candidate_token: &str,
+        hdr: &FrameHeader,
+        ciphertext: &[u8],
+    ) -> Result<(SendCipher, RecvCipher, Vec<u8>), ProtocolError> {
+        let (send_c, mut recv_c) = derive_directional_ciphers(
+            &self.shared_bytes,
+            &self.client_pub,
+            &self.host_pub,
+            &self.client_salt,
+            &self.host_salt,
+            candidate_token,
+            false,
+        );
+        let pt = recv_c.open(hdr, ciphertext)?;
+        Ok((send_c, recv_c, pt))
+    }
+}
+
 pub fn accept_e2ee_server(
     init_payload: &[u8],
     token: &str,
 ) -> Result<([u8; E2EE_HANDSHAKE_LEN], SendCipher, RecvCipher), ProtocolError> {
-    if init_payload.len() < E2EE_HANDSHAKE_LEN {
-        return Err(ProtocolError::Truncated("E2eeInit"));
-    }
-    let mut client_pub = [0u8; 32];
-    let mut client_salt = [0u8; 16];
-    client_pub.copy_from_slice(&init_payload[0..32]);
-    client_salt.copy_from_slice(&init_payload[32..48]);
-
-    let sec_bytes: [u8; 32] = rand::random();
-    let host_salt: [u8; 16] = rand::random();
-    let secret = StaticSecret::from(sec_bytes);
-    let host_pub = *PublicKey::from(&secret).as_bytes();
-
-    let peer = PublicKey::from(client_pub);
-    let shared = secret.diffie_hellman(&peer);
-
-    let mut ack_payload = [0u8; E2EE_HANDSHAKE_LEN];
-    ack_payload[0..32].copy_from_slice(&host_pub);
-    ack_payload[32..48].copy_from_slice(&host_salt);
-
+    let (hs, ack_payload) = ServerE2eeHandshake::begin(init_payload)?;
     let (send_c, recv_c) = derive_directional_ciphers(
-        shared.as_bytes(),
-        &client_pub,
-        &host_pub,
-        &client_salt,
-        &host_salt,
+        &hs.shared_bytes,
+        &hs.client_pub,
+        &hs.host_pub,
+        &hs.client_salt,
+        &hs.host_salt,
         token,
         false,
     );
@@ -612,6 +659,59 @@ impl KeyEventPacket {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorStatePacket {
+    pub norm_x: u16,
+    pub norm_y: u16,
+    pub shape: u8,
+    pub visible: u8,
+}
+
+impl CursorStatePacket {
+    pub fn serialize(&self) -> [u8; 6] {
+        let mut b = [0u8; 6];
+        b[0..2].copy_from_slice(&self.norm_x.to_le_bytes());
+        b[2..4].copy_from_slice(&self.norm_y.to_le_bytes());
+        b[4] = self.shape;
+        b[5] = self.visible;
+        b
+    }
+
+    pub fn deserialize(b: &[u8]) -> Result<Self, ProtocolError> {
+        if b.len() < 6 {
+            return Err(ProtocolError::Truncated("CursorState"));
+        }
+        Ok(Self {
+            norm_x: u16::from_le_bytes([b[0], b[1]]),
+            norm_y: u16::from_le_bytes([b[2], b[3]]),
+            shape: b[4],
+            visible: b[5],
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorInfo {
+    pub index: u16,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorSelectAckPayload {
+    pub ok: bool,
+    pub active_monitor: u16,
+    pub width: u16,
+    pub height: u16,
+    pub monitors: Vec<MonitorInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloPayload {
@@ -632,6 +732,10 @@ pub struct HelloAckPayload {
     pub exec_enabled: bool,
     #[serde(default)]
     pub codec_probe: serde_json::Value,
+    #[serde(default)]
+    pub monitors: Vec<MonitorInfo>,
+    #[serde(default)]
+    pub active_monitor: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -867,5 +971,34 @@ mod tests {
         assert!(host_rx_wrong.open(&hdr2, &ct2).is_err());
 
         assert!(client_rx.open(&bad_hdr, &h_ct).is_err());
+
+        // Dual-token ServerE2eeHandshake (temporary vs unattended password) + CursorStatePacket
+        let (c_hs, c_init) = E2eeClientHandshake::new();
+        let (srv_pending, srv_ack) = ServerE2eeHandshake::begin(&c_init).unwrap();
+        let (mut c_tx, _) = c_hs.finish(&srv_ack, "unattended-fixed-pwd").unwrap();
+        let (cf, cct) = c_tx
+            .seal(MsgType::Hello, ChannelId::Control, 0, 1, b"unattended-auth")
+            .unwrap();
+        let chdr = FrameHeader {
+            version: PROTOCOL_VERSION,
+            msg_type: MsgType::Hello,
+            flags: cf,
+            channel: 0,
+            payload_len: cct.len() as u32,
+            seq_id: 1,
+        };
+        assert!(srv_pending.try_open_first_frame("temp-pwd", &chdr, &cct).is_err());
+        let (_, _, opened) = srv_pending
+            .try_open_first_frame("unattended-fixed-pwd", &chdr, &cct)
+            .unwrap();
+        assert_eq!(opened, b"unattended-auth");
+
+        let cur = CursorStatePacket {
+            norm_x: 32768,
+            norm_y: 16384,
+            shape: 2,
+            visible: 1,
+        };
+        assert_eq!(CursorStatePacket::deserialize(&cur.serialize()).unwrap(), cur);
     }
 }

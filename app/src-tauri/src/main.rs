@@ -3,15 +3,16 @@
 use base64::Engine;
 use ctd_core::client::{ConnectInfo, ConnectParams, DownloadResult, ScreenshotResult};
 use ctd_core::{clipboard, HostConfig, HostHandle, HostStatus, RemoteClient};
+use ctd_protocol::{key_mod_flags, MonitorSelectAckPayload};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::{sleep, Duration};
 
 struct AppState {
     host: Arc<Mutex<Option<HostHandle>>>,
-    // RwLock allows concurrent non-blocking mouse/key writes with ZERO lock contention!
     client: Arc<RwLock<Option<Arc<RemoteClient>>>>,
 }
 
@@ -79,6 +80,16 @@ async fn host_status(state: State<'_, AppState>) -> Result<Option<HostStatus>, S
 }
 
 #[tauri::command]
+async fn host_kick_viewers(state: State<'_, AppState>) -> Result<bool, String> {
+    let guard = state.host.lock().await;
+    if let Some(h) = guard.as_ref() {
+        h.kick_viewers();
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[tauri::command]
 async fn connect_remote(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -88,11 +99,15 @@ async fn connect_remote(
         prev.disconnect();
     }
     let app_frames = app.clone();
+    let app_cursor = app.clone();
     let app_rtt = app.clone();
     let client = RemoteClient::connect_streaming(
         &params,
         move |tile_ev| {
             let _ = app_frames.emit("remote-tile-frame", &tile_ev);
+        },
+        move |cur_ev| {
+            let _ = app_cursor.emit("remote-cursor", &cur_ev);
         },
         move |rtt_ms| {
             let _ = app_rtt.emit("remote-rtt", rtt_ms);
@@ -122,6 +137,59 @@ async fn remote_set_stream_quality(
     let guard = state.client.read().await;
     let c = guard.as_ref().ok_or_else(|| "Not connected".to_string())?;
     c.set_stream_quality(max_width, quality)
+}
+
+#[tauri::command]
+async fn remote_select_monitor(
+    state: State<'_, AppState>,
+    index: u16,
+) -> Result<MonitorSelectAckPayload, String> {
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+    c.select_monitor(index).await
+}
+
+#[tauri::command]
+async fn remote_send_combo(state: State<'_, AppState>, combo: String) -> Result<(), String> {
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+
+    // Each combo is `(modifiers_vks, mod_flags, main_vk)`
+    let (mods, flags, main_vk): (&[u16], u16, u16) = match combo.as_str() {
+        "task_mgr" => (&[0x11, 0x10], key_mod_flags::CTRL | key_mod_flags::SHIFT, 0x1B), // Ctrl+Shift+Esc
+        "ctrl_alt_del" => (&[0x11, 0x12], key_mod_flags::CTRL | key_mod_flags::ALT, 0x2E), // Ctrl+Alt+Del
+        "show_desktop_win" => (&[0x5B], key_mod_flags::META, 0x44), // Win+D
+        "show_desktop_mac" => (&[], 0, 0x7A), // F11 (macOS Show Desktop)
+        "mission_control" => (&[], 0, 0x72), // F3 (macOS Mission Control)
+        "app_switch_win" => (&[0x12], key_mod_flags::ALT, 0x09), // Alt+Tab
+        "app_switch_mac" => (&[0x5B], key_mod_flags::META, 0x09), // Cmd+Tab
+        "lock_win" => (&[0x5B], key_mod_flags::META, 0x4C), // Win+L
+        "lock_mac" => (
+            &[0x11, 0x5B],
+            key_mod_flags::CTRL | key_mod_flags::META,
+            0x51,
+        ), // Ctrl+Cmd+Q
+        _ => return Err(format!("Unknown combo: {combo}")),
+    };
+
+    for &m in mods {
+        c.key_event_ext(0, m, flags, 0)?;
+    }
+    c.key_event_ext(0, main_vk, flags, 0)?;
+    sleep(Duration::from_millis(25)).await;
+    c.key_event_ext(1, main_vk, flags, 0)?;
+    for &m in mods.iter().rev() {
+        c.key_event_ext(1, m, 0, 0)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -355,9 +423,12 @@ fn main() {
             start_host,
             stop_host,
             host_status,
+            host_kick_viewers,
             connect_remote,
             disconnect_remote,
             remote_set_stream_quality,
+            remote_select_monitor,
+            remote_send_combo,
             remote_screenshot,
             remote_click,
             remote_mouse_norm,

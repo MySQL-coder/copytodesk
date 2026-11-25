@@ -6,11 +6,24 @@ window.addEventListener('DOMContentLoaded', () => {
   const STORAGE_KEY_V1 = 'copytodesk_settings_v1';
   const FILE_CHUNK_BYTES = 256 * 1024; // 256 KB streaming chunks
 
-  // Protocol key_mod_flags bitmask (matches ctd_protocol::key_mod_flags)
   const KEY_MOD_SHIFT = 1 << 1;
   const KEY_MOD_CTRL = 1 << 2;
   const KEY_MOD_ALT = 1 << 3;
   const KEY_MOD_META = 1 << 4;
+
+  const CURSOR_CSS_MAP = {
+    0: 'default',
+    1: 'text',
+    2: 'pointer',
+    3: 'wait',
+    4: 'crosshair',
+    5: 'ew-resize',
+    6: 'ns-resize',
+    7: 'nwse-resize',
+    8: 'nesw-resize',
+    9: 'move',
+    10: 'not-allowed',
+  };
 
   function log(msg) {
     const el = $('eventLog');
@@ -88,12 +101,15 @@ window.addEventListener('DOMContentLoaded', () => {
   let connMode = 'relay';
   let connected = false;
   let ctrlCmdMapEnabled = false;
+  let scaleOneToOne = false;
+  let autoTier = '1280:68';
   let webLoopToken = 0;
   let origW = 1280;
   let origH = 720;
   let streamW = 1280;
   let streamH = 720;
   let lastMoveSent = 0;
+  let cursorHideTimer = null;
 
   // Rolling 1s HUD telemetry
   let secFrames = 0;
@@ -103,7 +119,6 @@ window.addEventListener('DOMContentLoaded', () => {
   let lastRttMs = 0;
   let losslessState = false;
 
-  // Track remote held modifier VKs so we can release cleanly on blur/disconnect
   const heldRemoteVks = new Set();
 
   const cvs = $('screen');
@@ -113,6 +128,11 @@ window.addEventListener('DOMContentLoaded', () => {
     const s = String(raw || '').replace(/\s+/g, '');
     if (/^\d{6,12}$/.test(s)) return s.replace(/(\d{3})(?=\d)/g, '$1 ');
     return s;
+  }
+
+  function updatePermBadge() {
+    const hasPerm = Boolean($('hostPermPwd').value.trim());
+    $('permPwdBadge').style.display = hasPerm ? 'inline-flex' : 'none';
   }
 
   function updateHud() {
@@ -146,6 +166,26 @@ window.addEventListener('DOMContentLoaded', () => {
     updateHud();
   }, 1000);
 
+  // Auto Adaptive Bitrate Controller (runs every 4s when viewerQuality == 'auto')
+  setInterval(() => {
+    if (!connected || !isTauri || !invoke) return;
+    if ($('viewerQuality').value !== 'auto' || lastRttMs <= 0) return;
+    let nextTier = autoTier;
+    if (lastRttMs < 24) {
+      nextTier = '1920:78';
+    } else if (lastRttMs > 95) {
+      nextTier = '960:56';
+    } else if (lastRttMs > 32 && lastRttMs <= 85) {
+      nextTier = '1280:68';
+    }
+    if (nextTier !== autoTier) {
+      autoTier = nextTier;
+      const [mw, q] = nextTier.split(':').map(Number);
+      invoke('remote_set_stream_quality', { maxWidth: mw, quality: q }).catch(() => {});
+      log(`智能码率自适应调整: RTT=${lastRttMs.toFixed(1)}ms -> ${mw}p Q=${q}`);
+    }
+  }, 4000);
+
   function saveSettings() {
     try {
       if (!deviceSecret) deviceSecret = randomHex(16);
@@ -153,6 +193,7 @@ window.addEventListener('DOMContentLoaded', () => {
         deviceSecret,
         hostDevId: $('hostDevId').value,
         hostToken: $('hostToken').value,
+        hostPermPwd: $('hostPermPwd').value,
         hostBind: $('hostBind').value,
         hostRelay: $('hostRelay').value,
         hostAllowInput: $('hostAllowInput').checked,
@@ -164,6 +205,7 @@ window.addEventListener('DOMContentLoaded', () => {
         viewerQuality: $('viewerQuality').value,
       };
       localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(data));
+      updatePermBadge();
     } catch {
       // ignore storage errors
     }
@@ -184,6 +226,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
         if (typeof d.hostDevId === 'string' && d.hostDevId.trim()) $('hostDevId').value = d.hostDevId;
         if (typeof d.hostToken === 'string') $('hostToken').value = d.hostToken;
+        if (typeof d.hostPermPwd === 'string') $('hostPermPwd').value = d.hostPermPwd;
         if (typeof d.hostBind === 'string' && d.hostBind.trim()) {
           $('hostBind').value = (fromV1 && d.hostBind.trim() === '127.0.0.1:19800') ? '0.0.0.0:19800' : d.hostBind;
         }
@@ -202,6 +245,7 @@ window.addEventListener('DOMContentLoaded', () => {
       } else if (fromV1) {
         saveSettings();
       }
+      updatePermBadge();
     } catch {
       if (!deviceSecret) deviceSecret = randomHex(16);
     }
@@ -238,11 +282,13 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   function currentQuality() {
-    const parts = ($('viewerQuality').value || '1280:68').split(':');
+    const raw = $('viewerQuality').value || 'auto';
+    const spec = raw === 'auto' ? autoTier : raw;
+    const parts = spec.split(':');
     return { maxWidth: Number(parts[0]) || 0, quality: Number(parts[1]) || 68 };
   }
 
-  for (const id of ['hostDevId', 'hostToken', 'hostBind', 'hostRelay', 'connDirect', 'connDevId', 'connToken']) {
+  for (const id of ['hostDevId', 'hostToken', 'hostPermPwd', 'hostBind', 'hostRelay', 'connDirect', 'connDevId', 'connToken']) {
     $(id).addEventListener('input', () => {
       if (id === 'hostDevId') $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
       if (id === 'hostBind') $('hostAddrHint').textContent = `局域网直连监听：${$('hostBind').value.trim() || '0.0.0.0:19800'}`;
@@ -257,7 +303,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (connected && isTauri && invoke) {
       const { maxWidth, quality } = currentQuality();
       invoke('remote_set_stream_quality', { maxWidth, quality }).catch(() => {});
-      toast('已切换画质并请求关键帧');
+      toast($('viewerQuality').value === 'auto' ? '已启用智能网络自适应画质' : '已切换画质并请求关键帧');
     }
   });
 
@@ -326,8 +372,8 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   $('btnRefreshDevs').addEventListener('click', refreshDevices);
 
-  // Poll host relay ownership status
-  async function refreshHostRelayBadge() {
+  // Poll host relay status + live connected viewers audit
+  async function refreshHostStatusAudit() {
     if (!hostRunning || !isTauri || !invoke) return;
     try {
       const st = await invoke('host_status');
@@ -342,7 +388,6 @@ window.addEventListener('DOMContentLoaded', () => {
         ob.className = 'badge err';
         ob.textContent = '⚠ 设备码已被他人占用';
         $('hostAddrHint').textContent = '⚠ 该设备代码已被其他设备绑定！请在「高级设置」更换本机设备代码后重启服务';
-        toast('该设备代码已被其他设备绑定，请更换本机设备代码', 'err');
       } else if (st.relayStatus === 'reconnecting' || st.relayStatus === 'connecting') {
         ob.style.display = 'inline-flex';
         ob.className = 'badge';
@@ -350,14 +395,31 @@ window.addEventListener('DOMContentLoaded', () => {
       } else {
         ob.style.display = 'none';
       }
+
+      const sessions = st.activeSessions || [];
+      if (sessions.length > 0) {
+        $('activeSessionsBar').style.display = 'flex';
+        $('activeSessionsText').textContent = `👁 当前正在被远控 (${sessions.length} 台)：${sessions.join(', ')}`;
+      } else {
+        $('activeSessionsBar').style.display = 'none';
+      }
     } catch {
       // ignore
     }
   }
 
   setInterval(() => {
-    if (hostRunning) refreshHostRelayBadge();
-  }, 6000);
+    if (hostRunning) refreshHostStatusAudit();
+  }, 3000);
+
+  $('btnKickViewers').addEventListener('click', async () => {
+    if (!isTauri || !invoke) return;
+    await invoke('host_kick_viewers').catch(() => {});
+    $('activeSessionsBar').style.display = 'none';
+    log('已主动强制断开所有正在远控本机的会话');
+    toast('已断开所有远控会话', 'ok');
+    setTimeout(refreshHostStatusAudit, 400);
+  });
 
   $('btnStartHost').addEventListener('click', async () => {
     invoke = getTauriInvoke();
@@ -375,6 +437,7 @@ window.addEventListener('DOMContentLoaded', () => {
         config: {
           bindAddr,
           token: $('hostToken').value,
+          unattendedToken: $('hostPermPwd').value.trim(),
           deviceId: $('hostDevId').value.replace(/\s+/g, '') || '888100200',
           deviceSecret,
           deviceName: `CopyToDesk-${localOs}`,
@@ -391,16 +454,17 @@ window.addEventListener('DOMContentLoaded', () => {
       hostRunning = true;
       $('hostBadge').textContent = '被控运行中';
       $('hostBadge').className = 'badge ok';
-      $('captureInfoBadge').textContent = `${st.captureBackend} · ${st.width}×${st.height}`;
+      const monCount = (st.monitors && st.monitors.length) ? ` · ${st.monitors.length}屏` : '';
+      $('captureInfoBadge').textContent = `${st.captureBackend} · ${st.width}×${st.height}${monCount}`;
       const lanHint = (st.lanAddrs && st.lanAddrs.length > 0) ? `局域网IP: ${st.lanAddrs.join(', ')}` : st.bindAddr;
       $('hostAddrHint').textContent = `${lanHint}（E2EE + 20s 保活已启用）`;
       $('hostQuickInfo').textContent = `被控运行中 (${relayVal ? '中继+内网双栈' : st.bindAddr})`;
       $('hostNavDot').className = 'nav-dot on';
       $('btnStartHost').style.display = 'none';
       $('btnStopHost').style.display = 'inline-flex';
-      log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} | LAN=${(st.lanAddrs || []).join(',')} | 中继=${relayVal || '无'}`);
+      log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} (${(st.monitors || []).length} 显示器) | LAN=${(st.lanAddrs || []).join(',')}`);
       toast(`被控已启动 (${st.width}×${st.height})`, 'ok');
-      setTimeout(refreshHostRelayBadge, 900);
+      setTimeout(refreshHostStatusAudit, 800);
     } catch (e) {
       $('hostBadge').textContent = '启动失败';
       $('hostBadge').className = 'badge err';
@@ -421,6 +485,7 @@ window.addEventListener('DOMContentLoaded', () => {
     $('hostBadge').className = 'badge';
     $('captureInfoBadge').textContent = '待启动';
     $('ownerInfoBadge').style.display = 'none';
+    $('activeSessionsBar').style.display = 'none';
     $('hostQuickInfo').textContent = '被控服务：已停止';
     $('hostNavDot').className = 'nav-dot';
     $('btnStopHost').style.display = 'none';
@@ -428,6 +493,67 @@ window.addEventListener('DOMContentLoaded', () => {
     log('被控服务已秒停释放端口');
     toast('已停止本机被控服务');
   });
+
+  // ---- Multi-Monitor Selector Helper ----
+  function populateMonitorSelect(monitors, activeIndex) {
+    const sel = $('viewerMonitor');
+    sel.innerHTML = '';
+    const list = Array.isArray(monitors) ? monitors : [];
+    if (list.length === 0) {
+      sel.style.display = 'none';
+      return;
+    }
+    sel.style.display = 'inline-block';
+    for (const m of list) {
+      const opt = document.createElement('option');
+      opt.value = String(m.index);
+      opt.style.color = '#000';
+      const pri = m.isPrimary ? '主屏 ' : '';
+      opt.textContent = `🖥 屏幕${m.index + 1} (${pri}${m.width}×${m.height})`;
+      if (m.index === activeIndex) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  }
+
+  $('viewerMonitor').addEventListener('change', async () => {
+    if (!connected || !isTauri || !invoke) return;
+    const idx = Number($('viewerMonitor').value) || 0;
+    try {
+      const ack = await invoke('remote_select_monitor', { index: idx });
+      if (ack && ack.ok) {
+        origW = ack.width;
+        origH = ack.height;
+        streamW = ack.width;
+        streamH = ack.height;
+        populateMonitorSelect(ack.monitors, ack.activeMonitor);
+        toast(`已切换至屏幕 ${ack.activeMonitor + 1} (${ack.width}×${ack.height})`, 'ok');
+        log(`远端显示器已切换: index=${ack.activeMonitor} (${ack.width}x${ack.height})`);
+      }
+    } catch (e) {
+      toast('切换显示器失败: ' + e, 'err');
+    }
+    cvs.focus();
+  });
+
+  // ---- Remote Cursor Shape + Floating Indicator ----
+  function handleRemoteCursor(cur) {
+    if (!connected) return;
+    if (!cur.visible) {
+      cvs.style.cursor = 'none';
+      $('remoteCursorDot').style.display = 'none';
+      return;
+    }
+    cvs.style.cursor = CURSOR_CSS_MAP[cur.shape] || 'default';
+    const dot = $('remoteCursorDot');
+    dot.style.display = 'block';
+    dot.style.opacity = '0.9';
+    dot.style.left = `${((cur.normX / 65535) * 100).toFixed(2)}%`;
+    dot.style.top = `${((cur.normY / 65535) * 100).toFixed(2)}%`;
+    if (cursorHideTimer) clearTimeout(cursorHideTimer);
+    cursorHideTimer = setTimeout(() => {
+      dot.style.opacity = '0';
+    }, 1400);
+  }
 
   // ---- True Incremental Tile Push Renderer ----
   let renderChain = Promise.resolve();
@@ -517,6 +643,7 @@ window.addEventListener('DOMContentLoaded', () => {
     $('btnConnect').disabled = true;
     $('btnConnect').textContent = '密钥协商中...';
     try {
+      autoTier = '1280:68';
       const { maxWidth, quality } = currentQuality();
       if (isTauri) {
         const useRelay = connMode === 'relay';
@@ -539,7 +666,8 @@ window.addEventListener('DOMContentLoaded', () => {
         streamH = ack.height;
         remoteOs = (ack.codecProbe && ack.codecProbe.os) ? String(ack.codecProbe.os) : '';
 
-        // Smart auto-enable Ctrl <-> Cmd mapping when crossing Windows/Linux <-> macOS
+        populateMonitorSelect(ack.monitors || [], ack.activeMonitor || 0);
+
         ctrlCmdMapEnabled = Boolean(remoteOs && ((localOs === 'macos') !== (remoteOs === 'macos')));
         updateKeyMapBtn();
 
@@ -556,7 +684,7 @@ window.addEventListener('DOMContentLoaded', () => {
           rb.textContent = `⚡ 直连 (${info.endpoint})`;
           rb.style.color = '#86efac';
         }
-        log(`E2EE 连接成功 [${info.route} -> ${info.endpoint}]: 远端=${remoteOs || 'unknown'} ${ack.captureBackend} ${ack.width}x${ack.height} (Ctrl↔Cmd=${ctrlCmdMapEnabled ? '自动开启' : '关'})`);
+        log(`E2EE 连接成功 [${info.route} -> ${info.endpoint}]: 远端=${remoteOs || 'unknown'} ${ack.captureBackend} ${ack.width}x${ack.height} (${(ack.monitors || []).length}屏)`);
         toast(info.route === 'lan-p2p' ? `🔒 E2EE 局域网直连 (${info.endpoint})` : `🔒 E2EE 已连接 (${ack.inputBackend})`, 'ok');
       } else {
         toast('已建立 Web 远程连接', 'ok');
@@ -569,7 +697,7 @@ window.addEventListener('DOMContentLoaded', () => {
       $('hud').textContent = '等待首帧推流...';
       $('connNavDot').className = 'nav-dot on';
       $('emptyStage').style.display = 'none';
-      cvs.style.display = 'block';
+      $('canvasWrap').style.display = 'inline-flex';
       switchTab('viewer');
       cvs.focus();
       if (!isTauri) {
@@ -587,19 +715,76 @@ window.addEventListener('DOMContentLoaded', () => {
 
   $('btnDisconnect').addEventListener('click', () => {
     releaseAllRemoteModifiers();
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
     webLoopToken++;
     connected = false;
     $('connNavDot').className = 'nav-dot';
     $('e2eeBadge').style.display = 'none';
     $('routeBadge').style.display = 'none';
+    $('viewerMonitor').style.display = 'none';
+    $('remoteCursorDot').style.display = 'none';
     $('hud').textContent = '已断开';
-    cvs.style.display = 'none';
+    $('canvasWrap').style.display = 'none';
     $('emptyStage').style.display = 'flex';
     switchTab('home');
     toast('已断开远程连接');
     if (isTauri && invoke) {
       invoke('disconnect_remote').catch(() => {});
     }
+  });
+
+  // ---- Scale Mode & Fullscreen & System Combo Shortcuts ----
+  $('btnScaleMode').addEventListener('click', () => {
+    scaleOneToOne = !scaleOneToOne;
+    $('canvasWrap').classList.toggle('scale-1to1', scaleOneToOne);
+    $('btnScaleMode').classList.toggle('active', scaleOneToOne);
+    $('btnScaleMode').textContent = scaleOneToOne ? '🔍 1:1 原寸' : '🔍 自适应';
+    cvs.focus();
+  });
+
+  $('btnFullscreen').addEventListener('click', async () => {
+    const page = $('tab-viewer');
+    try {
+      if (!document.fullscreenElement) {
+        await page.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // ignore if unsupported
+    }
+    cvs.focus();
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    const isFs = Boolean(document.fullscreenElement);
+    $('btnFullscreen').classList.toggle('active', isFs);
+    $('btnFullscreen').textContent = isFs ? '⛶ 退出全屏' : '⛶ 全屏';
+  });
+
+  $('comboSelect').addEventListener('change', async () => {
+    const raw = $('comboSelect').value;
+    $('comboSelect').value = '';
+    if (!raw || !connected || !isTauri || !invoke) return;
+
+    let combo = raw;
+    if (raw === 'show_desktop') {
+      combo = remoteOs === 'macos' ? 'show_desktop_mac' : 'show_desktop_win';
+    } else if (raw === 'app_switch') {
+      combo = remoteOs === 'macos' ? 'app_switch_mac' : 'app_switch_win';
+    } else if (raw === 'lock_screen') {
+      combo = remoteOs === 'macos' ? 'lock_mac' : 'lock_win';
+    }
+
+    try {
+      await invoke('remote_send_combo', { combo });
+      toast('已发送远程组合键: ' + combo, 'ok');
+    } catch (e) {
+      toast('发送组合键失败: ' + e, 'err');
+    }
+    cvs.focus();
   });
 
   $('btnKeyMap').addEventListener('click', () => {
@@ -623,16 +808,6 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     } catch (e) {
       toast('同步剪贴板失败: ' + e, 'err');
-    }
-    cvs.focus();
-  });
-
-  $('btnSnap').addEventListener('click', () => {
-    if (!connected) return;
-    if (isTauri && invoke) {
-      const { maxWidth, quality } = currentQuality();
-      invoke('remote_set_stream_quality', { maxWidth, quality }).catch(() => {});
-      toast('已请求完整关键帧');
     }
     cvs.focus();
   });
@@ -691,7 +866,7 @@ window.addEventListener('DOMContentLoaded', () => {
   cvs.addEventListener('mousemove', (ev) => {
     if (!connected || !isTauri) return;
     const now = performance.now();
-    if (now - lastMoveSent < 28) return;
+    if (now - lastMoveSent < 25) return;
     lastMoveSent = now;
     const { nx, ny } = mapNormXY(ev);
     sendMouseNorm(0, 0, nx, ny, 0);
@@ -711,13 +886,13 @@ window.addEventListener('DOMContentLoaded', () => {
     ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
     Delete: 0x2e, Shift: 0x10, Control: 0x11, Alt: 0x12, Meta: 0x5b,
     '-': 0xbd, '=': 0xbb,
+    F1: 0x70, F2: 0x71, F3: 0x72, F4: 0x73, F5: 0x74, F11: 0x7a,
   };
 
   function computeRemoteModifiers(ev) {
     let ctrl = ev.ctrlKey;
     let meta = ev.metaKey;
     if (ctrlCmdMapEnabled) {
-      // Swap Ctrl <-> Meta across Windows/Linux <-> macOS
       ctrl = ev.metaKey;
       meta = ev.ctrlKey;
     }
@@ -731,19 +906,20 @@ window.addEventListener('DOMContentLoaded', () => {
 
   function mapModifierVk(key) {
     if (ctrlCmdMapEnabled) {
-      if (key === 'Control') return 0x5b; // Map physical Ctrl -> Remote Command
-      if (key === 'Meta') return 0x11;    // Map physical Command -> Remote Ctrl
+      if (key === 'Control') return 0x5b;
+      if (key === 'Meta') return 0x11;
     }
     return SPECIAL_VK[key] || 0;
   }
 
   cvs.addEventListener('keydown', async (ev) => {
     if (!connected || !isTauri || !invoke) return;
+    // Allow Escape to exit fullscreen naturally when in fullscreen
+    if (ev.key === 'Escape' && document.fullscreenElement) return;
     ev.preventDefault();
 
     const { ctrl, meta, flags } = computeRemoteModifiers(ev);
 
-    // Pure modifier press
     if (ev.key === 'Control' || ev.key === 'Meta' || ev.key === 'Shift' || ev.key === 'Alt') {
       const mvk = mapModifierVk(ev.key);
       if (mvk) {
@@ -768,7 +944,6 @@ window.addEventListener('DOMContentLoaded', () => {
       const code = upper.charCodeAt(0);
       const isPrimaryShortcut = (remoteOs === 'macos') ? meta : ctrl;
 
-      // Seamless Paste: push local system clipboard to remote BEFORE injecting Cmd+V / Ctrl+V!
       if (isPrimaryShortcut && upper === 'V' && !ev.repeat) {
         try {
           const localTxt = await invoke('local_clipboard_get');
@@ -776,13 +951,12 @@ window.addEventListener('DOMContentLoaded', () => {
             await invoke('remote_clipboard_set', { text: localTxt });
           }
         } catch {
-          // continue key injection even if clipboard sync fails
+          // continue key injection
         }
       }
 
       invoke('remote_key_event', { action: 0, vk: code, flags, unicodeChar: 0 }).catch(() => {});
 
-      // Seamless Copy / Cut: pull remote system clipboard to local OS clipboard 150ms AFTER Cmd+C/X or Ctrl+C/X!
       if (isPrimaryShortcut && (upper === 'C' || upper === 'X') && !ev.repeat) {
         setTimeout(async () => {
           try {
@@ -888,7 +1062,7 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ---- Chunked Streaming File Transfer (Upload + Download + Drag & Drop) ----
+  // ---- Chunked Streaming File Transfer ----
   function showTransferProgress(title, transferred, total, speedMBs) {
     const box = $('transferProgressBox');
     box.style.display = 'block';
@@ -1138,7 +1312,6 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Drag & Drop on both DropZone and Remote Viewer Stage!
   for (const zone of [$('dropZone'), $('viewerStage')]) {
     if (!zone) continue;
     zone.addEventListener('dragover', (ev) => {
@@ -1222,6 +1395,7 @@ window.addEventListener('DOMContentLoaded', () => {
       const listen = getTauriListen();
       if (listen) {
         listen('remote-tile-frame', (event) => handleTilePushEvent(event.payload));
+        listen('remote-cursor', (event) => handleRemoteCursor(event.payload));
         listen('remote-rtt', (event) => {
           lastRttMs = Number(event.payload) || 0;
           updateHud();
@@ -1240,7 +1414,7 @@ window.addEventListener('DOMContentLoaded', () => {
         $('modeSubtitle').textContent = `Tauri 2 · ${info.os}/${info.arch}`;
         $('engineDot').className = 'dot ok';
         $('engineText').textContent = `原生引擎就绪 v${info.version}`;
-        log(`Tauri 2 原生推流+E2EE引擎就绪 (${info.os}/${info.arch} v${info.version}) | 下载目录: ${info.downloadsDir || 'Downloads/CopyToDesk'}`);
+        log(`Tauri 2 多屏+光标同步引擎就绪 (${info.os}/${info.arch} v${info.version})`);
       } catch (e) {
         $('engineDot').className = 'dot warn';
         $('engineText').textContent = 'IPC 通信异常';

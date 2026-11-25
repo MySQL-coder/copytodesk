@@ -1,22 +1,23 @@
-//! Cross-platform async Client (`RemoteClient`, v0.4.0 P1):
-//! - End-to-End Encryption (`X25519` + `HKDF-SHA256` + `ChaCha20-Poly1305`) negotiated automatically
-//! - Smart LAN-first P2P direct race (`LOOKUP` -> 380ms LAN probe -> seamless Relay fallback)
-//! - Lock-free split `OwnedReadHalf` / `OwnedWriteHalf` (0ms non-blocking mouse/key input)
-//! - Streaming 256 KB chunked upload & download with incremental SHA-256 verification
+//! Cross-platform async Client (`RemoteClient`, v0.5.0 P2):
+//! - End-to-End Encryption (`X25519` + `HKDF-SHA256` + `ChaCha20-Poly1305`)
+//! - Live multi-monitor switching (`select_monitor`) + real-time `CursorState` stream
+//! - Smart LAN-first P2P direct race + lock-free split writer + 256 KB chunked file transfer
 
 use crate::capture::now_us;
 use base64::Engine;
 use ctd_protocol::{
     connect_via_relay, frame_flags, lookup_lan_via_relay, read_frame, read_frame_opt_cipher,
-    write_frame, write_frame_opt_cipher, ChannelId, DownloadChunkReq, E2eeClientHandshake,
-    HelloAckPayload, HelloPayload, KeyEventPacket, MouseEventPacket, MsgType, RecvCipher,
-    SendCipher, TileEncoding, UploadChunkMeta, VideoTileFramePacket, FILE_CHUNK_SIZE,
+    write_frame, write_frame_opt_cipher, ChannelId, CursorStatePacket, DownloadChunkReq,
+    E2eeClientHandshake, HelloAckPayload, HelloPayload, KeyEventPacket, MonitorSelectAckPayload,
+    MouseEventPacket, MsgType, RecvCipher, SendCipher, TileEncoding, UploadChunkMeta,
+    VideoTileFramePacket, FILE_CHUNK_SIZE,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
@@ -68,6 +69,15 @@ pub struct TilePushEvent {
     pub tiles: Vec<TileItem>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorPushEvent {
+    pub norm_x: u16,
+    pub norm_y: u16,
+    pub shape: u8,
+    pub visible: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotResult {
@@ -95,6 +105,8 @@ pub struct RemoteClient {
     tx: mpsc::UnboundedSender<(MsgType, ChannelId, Vec<u8>)>,
     waiters: RpcWaiters,
     upload_hashers: Mutex<HashMap<String, Sha256>>,
+    remote_w: AtomicU16,
+    remote_h: AtomicU16,
     cancel: Arc<Notify>,
     pub info: ConnectInfo,
 }
@@ -159,13 +171,15 @@ async fn perform_e2ee_hello(
 }
 
 impl RemoteClient {
-    pub async fn connect_streaming<F, R>(
+    pub async fn connect_streaming<F, C, R>(
         params: &ConnectParams,
         on_frame: F,
+        on_cursor: C,
         on_rtt: R,
     ) -> Result<Self, String>
     where
         F: Fn(TilePushEvent) + Send + Sync + 'static,
+        C: Fn(CursorPushEvent) + Send + Sync + 'static,
         R: Fn(f64) + Send + Sync + 'static,
     {
         let cname = params
@@ -173,7 +187,6 @@ impl RemoteClient {
             .as_deref()
             .unwrap_or("CopyToDesk-Desktop");
 
-        // 1. Smart LAN-First P2P Race vs Relay / Direct (with full E2EE handshake)
         let (stream, ack, mut send_cipher, mut recv_cipher, route, endpoint) =
             if let (Some(relay), Some(dev)) = (&params.relay_addr, &params.device_id) {
                 if !relay.is_empty() && !dev.is_empty() {
@@ -220,6 +233,8 @@ impl RemoteClient {
                 (s2, ack, sc, rc, "direct".to_string(), addr.to_string())
             };
 
+        let init_w = ack.width;
+        let init_h = ack.height;
         let info = ConnectInfo {
             ack,
             route,
@@ -296,6 +311,16 @@ impl RemoteClient {
                             });
                         }
                     }
+                    MsgType::CursorState => {
+                        if let Ok(cur) = CursorStatePacket::deserialize(&payload) {
+                            on_cursor(CursorPushEvent {
+                                norm_x: cur.norm_x,
+                                norm_y: cur.norm_y,
+                                shape: cur.shape,
+                                visible: cur.visible != 0,
+                            });
+                        }
+                    }
                     MsgType::Pong if payload.len() >= 8 => {
                         let sent = u64::from_le_bytes(payload[0..8].try_into().unwrap());
                         let now = now_us();
@@ -337,6 +362,8 @@ impl RemoteClient {
             tx,
             waiters,
             upload_hashers: Mutex::new(HashMap::new()),
+            remote_w: AtomicU16::new(init_w),
+            remote_h: AtomicU16::new(init_h),
             cancel,
             info,
         };
@@ -383,6 +410,25 @@ impl RemoteClient {
         self.send_fast(MsgType::RequestKeyFrame, ChannelId::Control, p)
     }
 
+    pub async fn select_monitor(&self, index: u16) -> Result<MonitorSelectAckPayload, String> {
+        let resp = self
+            .request_rpc(
+                MsgType::MonitorSelect,
+                MsgType::MonitorSelectAck,
+                ChannelId::Control,
+                index.to_le_bytes().to_vec(),
+                5000,
+            )
+            .await?;
+        let ack: MonitorSelectAckPayload =
+            serde_json::from_slice(&resp).map_err(|e| e.to_string())?;
+        if ack.ok {
+            self.remote_w.store(ack.width, Ordering::Relaxed);
+            self.remote_h.store(ack.height, Ordering::Relaxed);
+        }
+        Ok(ack)
+    }
+
     pub fn mouse_event_norm(
         &self,
         action: u8,
@@ -413,8 +459,10 @@ impl RemoteClient {
         y: u32,
         wheel_delta: i16,
     ) -> Result<(), String> {
-        let nx = ((x as u64 * 65535) / (self.info.ack.width.max(1) as u64)).min(65535) as u16;
-        let ny = ((y as u64 * 65535) / (self.info.ack.height.max(1) as u64)).min(65535) as u16;
+        let w = self.remote_w.load(Ordering::Relaxed).max(1) as u64;
+        let h = self.remote_h.load(Ordering::Relaxed).max(1) as u64;
+        let nx = ((x as u64 * 65535) / w).min(65535) as u16;
+        let ny = ((y as u64 * 65535) / h).min(65535) as u16;
         self.mouse_event_norm(action, button, nx, ny, wheel_delta)
     }
 
@@ -735,9 +783,8 @@ mod tests {
     use crate::host::{HostConfig, HostHandle};
 
     #[tokio::test]
-    async fn e2ee_session_and_chunked_file_transfer_roundtrip() {
-        let tmp_root = std::env::temp_dir()
-            .join(format!("ctd-test-{}", rand::random::<u32>()));
+    async fn e2ee_dual_token_monitor_switch_and_chunked_file_roundtrip() {
+        let tmp_root = std::env::temp_dir().join(format!("ctd-test-{}", rand::random::<u32>()));
         let host_files = tmp_root.join("host");
         let client_dl = tmp_root.join("downloads");
         std::fs::create_dir_all(&host_files).unwrap();
@@ -745,12 +792,13 @@ mod tests {
 
         let cfg = HostConfig {
             bind_addr: "127.0.0.1:0".into(),
-            token: "p1-e2ee-secret".into(),
+            token: "p2-temp-secret".into(),
+            unattended_token: "p2-unattended-perm".into(),
             device_id: "999888777".into(),
             device_secret: "owner-secret-123".into(),
             device_name: "TestHost".into(),
             relay_addr: None,
-            fps: 10,
+            fps: 20,
             jpeg_quality: 70,
             force_synthetic: true,
             file_root: host_files.clone(),
@@ -767,25 +815,36 @@ mod tests {
             relay_addr: None,
             device_id: None,
             token: "wrong-pass".into(),
-            client_name: Some("TestClient".into()),
+            client_name: Some("BadClient".into()),
             initial_max_width: Some(640),
             initial_quality: Some(60),
         };
-        assert!(RemoteClient::connect_streaming(&bad_params, |_| {}, |_| {})
+        assert!(RemoteClient::connect_streaming(&bad_params, |_| {}, |_| {}, |_| {})
             .await
             .is_err());
 
-        // 2. Correct password establishes E2EE session
-        let ok_params = ConnectParams {
-            token: "p1-e2ee-secret".into(),
+        // 2. Unattended permanent password establishes E2EE session & lists 2 synthetic monitors
+        let perm_params = ConnectParams {
+            token: "p2-unattended-perm".into(),
+            client_name: Some("UnattendedViewer".into()),
             ..bad_params
         };
-        let client = RemoteClient::connect_streaming(&ok_params, |_| {}, |_| {})
+        let client = RemoteClient::connect_streaming(&perm_params, |_| {}, |_| {}, |_| {})
             .await
             .unwrap();
         assert!(client.info.encrypted);
+        assert_eq!(client.info.ack.monitors.len(), 2);
+        assert_eq!(client.info.ack.width, 1280);
+        assert_eq!(host.status().active_sessions, vec!["UnattendedViewer".to_string()]);
 
-        // 3. Multi-chunk binary upload (> 600 KB -> 3 chunks of 256 KB) + download verification
+        // 3. Hot-switch to Monitor #1 (1024x768) without reconnecting!
+        let mon_ack = client.select_monitor(1).await.unwrap();
+        assert!(mon_ack.ok);
+        assert_eq!(mon_ack.active_monitor, 1);
+        assert_eq!(mon_ack.width, 1024);
+        assert_eq!(mon_ack.height, 768);
+
+        // 4. Multi-chunk binary upload + download verification
         let big_data: Vec<u8> = (0..(600 * 1024)).map(|i| ((i * 31 + 7) & 0xff) as u8).collect();
         let expected_sha = hex::encode(Sha256::digest(&big_data));
 

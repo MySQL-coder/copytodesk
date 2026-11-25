@@ -88,6 +88,7 @@
   .tab-page { display: none; flex: 1; overflow-y: auto; padding: 24px 28px; }
   .tab-page.active { display: flex; flex-direction: column; gap: 20px; }
   .tab-page.viewer-tab { padding: 0; background: #0d121b; position: relative; overflow: hidden; }
+  .tab-page.viewer-tab:fullscreen { width: 100vw; height: 100vh; background: #070b11; }
 
   .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .page-head h1 { margin: 0; font-size: 20px; font-weight: 700; }
@@ -102,7 +103,7 @@
     display: flex; align-items: center; justify-content: space-between;
     margin-bottom: 18px; gap: 10px; flex-wrap: wrap;
   }
-  .card-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
   .badge {
     display: inline-flex; align-items: center; gap: 5px;
@@ -112,6 +113,12 @@
   .badge.ok { background: var(--ok-soft); color: #059669; }
   .badge.err { background: var(--danger-soft); color: var(--danger); }
   .badge.blue { background: var(--primary-soft); color: var(--primary); }
+
+  .session-alert {
+    margin-bottom: 14px; padding: 10px 14px; border-radius: 10px;
+    background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46;
+    display: none; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 500;
+  }
 
   /* ToDesk Hero Device Code Grid */
   .device-grid {
@@ -171,7 +178,7 @@
   .btn:hover { filter: brightness(1.05); }
   .btn:active { transform: scale(0.98); }
   .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
-  .btn.sm { height: 32px; padding: 0 12px; font-size: 12px; border-radius: 8px; }
+  .btn.sm { height: 30px; padding: 0 11px; font-size: 12px; border-radius: 7px; }
   .btn.xs { height: 26px; padding: 0 10px; font-size: 11.5px; border-radius: 6px; }
   .btn.ghost {
     background: #fff; color: var(--text); border: 1px solid var(--border); box-shadow: none;
@@ -197,32 +204,52 @@
 
   /* Remote Viewer Cinema Stage */
   .viewer-bar {
-    min-height: 48px; padding: 6px 14px; background: rgba(17, 24, 39, 0.94);
+    min-height: 46px; padding: 5px 12px; background: rgba(17, 24, 39, 0.95);
     border-bottom: 1px solid rgba(255,255,255,.08);
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: #e2e8f0;
+    display: flex; align-items: center; gap: 7px; flex-wrap: wrap; color: #e2e8f0;
   }
   .viewer-bar .pill-dark {
-    padding: 4px 9px; border-radius: 999px; background: rgba(255,255,255,.08);
-    font-family: Consolas, monospace; font-size: 11.5px; color: #93c5fd; white-space: nowrap;
+    padding: 3px 8px; border-radius: 999px; background: rgba(255,255,255,.08);
+    font-family: Consolas, monospace; font-size: 11px; color: #93c5fd; white-space: nowrap;
+  }
+  .viewer-bar .dark-select {
+    height: 28px; border-radius: 7px; background: rgba(255,255,255,.08); color: #fff;
+    border: 1px solid rgba(255,255,255,.16); padding: 0 7px; font-size: 11.5px; outline: none;
   }
   .viewer-bar .pill-btn {
-    height: 28px; padding: 0 10px; border-radius: 7px; font-size: 11.5px; font-weight: 600;
+    height: 28px; padding: 0 9px; border-radius: 7px; font-size: 11.5px; font-weight: 600;
     border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.08);
-    color: #e2e8f0; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+    color: #e2e8f0; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
   }
+  .viewer-bar .pill-btn:hover { background: rgba(255,255,255,.14); }
   .viewer-bar .pill-btn.active {
     background: rgba(16, 185, 129, 0.22); border-color: rgba(52, 211, 153, 0.55); color: #6ee7b7;
   }
   .viewer-bar input {
     height: 28px; border-radius: 7px; border: 1px solid rgba(255,255,255,.15);
-    background: rgba(255,255,255,.07); color: #fff; padding: 0 10px; font-size: 12px; width: 170px; outline: none;
+    background: rgba(255,255,255,.07); color: #fff; padding: 0 9px; font-size: 12px; width: 145px; outline: none;
   }
   .viewer-stage {
-    flex: 1; display: flex; align-items: center; justify-content: center; padding: 14px; overflow: auto;
+    flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px; overflow: auto; position: relative;
+  }
+  .canvas-wrap {
+    position: relative; display: inline-flex; max-width: 100%; max-height: 100%;
+  }
+  .canvas-wrap.scale-1to1 {
+    max-width: none; max-height: none;
   }
   .viewer-stage canvas {
-    max-width: 100%; max-height: 100%; background: #000; border-radius: 8px;
-    box-shadow: 0 16px 48px rgba(0,0,0,.55); cursor: crosshair;
+    max-width: 100%; max-height: calc(100vh - 76px); background: #000; border-radius: 8px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.55); cursor: default; display: block;
+  }
+  .canvas-wrap.scale-1to1 canvas {
+    max-width: none; max-height: none;
+  }
+  .remote-cursor-dot {
+    position: absolute; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid #38bdf8; background: rgba(56, 189, 248, 0.25);
+    transform: translate(-50%, -50%); pointer-events: none; display: none;
+    transition: opacity .25s ease; box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
   }
   .empty-stage {
     text-align: center; color: #94a3b8; display: flex; flex-direction: column; align-items: center; gap: 12px;
@@ -337,18 +364,24 @@
     <div class="page-head">
       <div>
         <h1>远程控制</h1>
-        <p>X25519+ChaCha20 端到端加密 · 局域网 P2P 直连竞速 · 设备号防抢注保护</p>
+        <p>E2EE 端到端加密 · 多显示器热切换 · 光标同步 · 局域网 P2P 直连竞速</p>
       </div>
       <span id="hostBadge" class="badge">被控未启动</span>
     </div>
 
     <!-- Card 1: This Device -->
     <div class="card">
+      <div id="activeSessionsBar" class="session-alert">
+        <span id="activeSessionsText">👁 当前远控连接：1 台</span>
+        <button id="btnKickViewers" class="btn xs danger">一键断开远控</button>
+      </div>
+
       <div class="card-header">
         <div class="card-title">
           允许控制本设备
           <span class="badge blue" id="captureInfoBadge">待启动</span>
           <span class="badge ok" id="ownerInfoBadge" style="display:none">🛡 防抢注已保护</span>
+          <span class="badge blue" id="permPwdBadge" style="display:none">🔑 无人值守已开启</span>
         </div>
         <div style="display:flex;gap:8px">
           <button id="btnStartHost" class="btn sm">启动被控服务</button>
@@ -368,7 +401,7 @@
 
         <div class="pwd-box">
           <div class="code-label">
-            <span>临时访问密码（防爆破保护已启用）</span>
+            <span>临时访问密码（可在高级设置配置固定无人值守密码）</span>
             <div style="display:flex;gap:5px">
               <button id="btnTogglePwd" class="icon-btn" title="显示/隐藏">👁</button>
               <button id="btnGenPwd" class="icon-btn" title="刷新随机密码">↻</button>
@@ -403,8 +436,8 @@
           <input id="connDevId" class="input" value="888100200" placeholder="请输入设备代码" />
         </div>
         <div class="field">
-          <label>临时访问密码</label>
-          <input id="connToken" class="input" value="demo123" placeholder="输入对方临时密码" />
+          <label>访问密码（临时密码或无人值守密码）</label>
+          <input id="connToken" class="input" value="demo123" placeholder="输入对方临时或固定密码" />
         </div>
         <button id="btnConnect" class="btn">立即连接</button>
       </div>
@@ -420,31 +453,51 @@
   <!-- TAB 2: REMOTE VIEWER -->
   <section id="tab-viewer" class="tab-page viewer-tab">
     <div class="viewer-bar">
-      <strong style="font-size:13px">远程桌面</strong>
       <span id="e2eeBadge" class="pill-dark" style="display:none;color:#6ee7b7;background:rgba(16,185,129,.18)">🔒 E2EE</span>
       <span id="routeBadge" class="pill-dark" style="display:none;color:#86efac"></span>
       <span id="hud" class="pill-dark">未连接</span>
-      <select id="viewerQuality" style="height:28px;border-radius:7px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.15);padding:0 8px;font-size:12px">
+
+      <select id="viewerMonitor" class="dark-select" title="切换远端物理显示器" style="display:none"></select>
+
+      <select id="viewerQuality" class="dark-select" title="画质与自适应码率控制">
+        <option value="auto" selected style="color:#000">智能自适应 (推荐)</option>
         <option value="960:60" style="color:#000">流畅 (960p)</option>
-        <option value="1280:68" selected style="color:#000">均衡 (1280p)</option>
+        <option value="1280:68" style="color:#000">均衡 (1280p)</option>
         <option value="1920:78" style="color:#000">高清 (1920p)</option>
         <option value="0:82" style="color:#000">原画 (无缩放)</option>
       </select>
+
+      <button id="btnScaleMode" class="pill-btn" title="切换画面自适应窗口或 1:1 原始像素">🔍 自适应</button>
       <button id="btnKeyMap" class="pill-btn" title="跨系统自动将 Ctrl+C/V/A/Z/S 映射为 macOS Command 键并自动同步系统剪贴板">⌘ Ctrl↔Cmd: 关</button>
+
+      <select id="comboSelect" class="dark-select" title="发送会被本机系统拦截的远程系统快捷键">
+        <option value="" style="color:#000">⚡ 组合键...</option>
+        <option value="show_desktop" style="color:#000">显示桌面 (Win+D / F11)</option>
+        <option value="app_switch" style="color:#000">切换窗口 (Alt+Tab / ⌘+Tab)</option>
+        <option value="task_mgr" style="color:#000">任务管理器 (Ctrl+Shift+Esc)</option>
+        <option value="ctrl_alt_del" style="color:#000">安全菜单 (Ctrl+Alt+Del)</option>
+        <option value="mission_control" style="color:#000">调度中心 (macOS F3)</option>
+        <option value="lock_screen" style="color:#000">锁定远端屏幕 (Win+L / ⌃⌘Q)</option>
+      </select>
+
       <button id="btnQuickClipSync" class="pill-btn" title="读取远端系统剪贴板并写入本机剪贴板">📋 同步剪贴板</button>
       <input id="typeInput" placeholder="输入文本回车发送..." />
       <button id="btnSendText" class="btn sm">发送</button>
-      <button id="btnSnap" class="pill-btn">关键帧</button>
-      <button id="btnDisconnect" class="btn sm danger" style="margin-left:auto">断开连接</button>
+      <button id="btnFullscreen" class="pill-btn" title="沉浸全屏远控 (Esc 退出)">⛶ 全屏</button>
+      <button id="btnDisconnect" class="btn sm danger" style="margin-left:auto">断开</button>
     </div>
+
     <div class="viewer-stage" id="viewerStage">
       <div id="emptyStage" class="empty-stage">
         <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         <div style="font-size:15px;color:#cbd5e1;font-weight:600">尚未连接远程设备</div>
-        <div style="font-size:12.5px">连接后支持增量瓦片流、E2EE 端到端加密、Ctrl↔Cmd 映射及拖拽文件直传</div>
+        <div style="font-size:12.5px">连接后支持多显示器热切换、光标形状同步、智能码率自适应、沉浸全屏及文件拖拽直传</div>
         <button id="btnBackHome" class="btn sm">返回远程控制</button>
       </div>
-      <canvas id="screen" tabindex="0" width="1280" height="720" style="display:none;outline:none"></canvas>
+      <div id="canvasWrap" class="canvas-wrap" style="display:none">
+        <canvas id="screen" tabindex="0" width="1280" height="720" style="outline:none"></canvas>
+        <div id="remoteCursorDot" class="remote-cursor-dot"></div>
+      </div>
     </div>
   </section>
 
@@ -459,7 +512,6 @@
     </div>
 
     <div class="two-col">
-      <!-- Remote Directory Browser + One-Click Download -->
       <div class="card">
         <div class="card-header">
           <div class="card-title">远端共享目录</div>
@@ -474,7 +526,6 @@
         </div>
       </div>
 
-      <!-- Real File Picker + Drag-and-Drop + Chunked Progress -->
       <div class="card">
         <div class="card-header">
           <div class="card-title">上传本地文件到远端</div>
@@ -508,7 +559,7 @@
           <summary style="cursor:pointer;font-size:12.5px;color:var(--text-2);font-weight:500">快捷新建远端文本文件</summary>
           <div style="margin-top:10px">
             <div class="field"><label>远端保存路径</label><input id="upName" class="input" value="notes/hello.txt" /></div>
-            <div class="field" style="margin-top:8px"><label>文本内容</label><textarea id="upContent" class="input" rows="3">Uploaded from CopyToDesk v0.4.0</textarea></div>
+            <div class="field" style="margin-top:8px"><label>文本内容</label><textarea id="upContent" class="input" rows="3">Uploaded from CopyToDesk v0.5.0</textarea></div>
             <button id="btnUpload" class="btn sm" style="margin-top:10px;width:100%">保存文本到远端</button>
           </div>
         </details>
@@ -553,28 +604,29 @@
     <div class="page-head">
       <div>
         <h1>高级设置与运行日志</h1>
-        <p>配置监听端口、中继服务器地址、设备防抢注密钥与安全护栏</p>
+        <p>配置监听端口、固定无人值守安全密码、中继服务器与权限护栏</p>
       </div>
     </div>
     <div class="card">
       <div class="card-header">
-        <div class="card-title">网络与被控安全参数</div>
+        <div class="card-title">网络、无人值守与被控安全参数</div>
         <button id="btnRotateSecret" class="btn xs ghost" title="仅在更换新设备代码且需重新生成本机归属证明时使用">重置防抢注密钥</button>
       </div>
       <div class="two-col">
         <div class="field"><label>本机监听地址 (0.0.0.0 允许同局域网 P2P 自动直连)</label><input id="hostBind" class="input" value="0.0.0.0:19800" /></div>
         <div class="field"><label>本机设备代码 (首次注册后自动绑定本机防抢注密钥)</label><input id="hostDevId" class="input" value="888100200" /></div>
         <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="38.34.13.214:19901" placeholder="例如 38.34.13.214:19901" /></div>
-        <div class="field" style="display:flex;flex-direction:column;justify-content:flex-end;gap:8px">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
-            <input type="checkbox" id="hostAllowInput" checked style="width:16px;height:16px" />
-            <span>允许远程键鼠控制 (Win32 / macOS CoreGraphics，macOS 需授辅助功能权限)</span>
-          </label>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
-            <input type="checkbox" id="hostExec" checked style="width:16px;height:16px" />
-            <span>允许受控白名单命令 (echo / hostname / whoami)</span>
-          </label>
-        </div>
+        <div class="field"><label>固定无人值守密码（可选，设置后与临时密码同时生效，重启被控生效）</label><input id="hostPermPwd" class="input" type="password" value="" placeholder="留空则仅允许首页临时密码连接" /></div>
+      </div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:14px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="hostAllowInput" checked style="width:16px;height:16px" />
+          <span>允许远程键鼠控制 (Win32 / macOS CoreGraphics / Linux XTest)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="hostExec" checked style="width:16px;height:16px" />
+          <span>允许受控白名单命令 (echo / hostname / whoami)</span>
+        </label>
       </div>
     </div>
 

@@ -1,26 +1,29 @@
-//! Cross-platform async Host service (v0.4.0 P1):
-//! - End-to-End Encryption (`X25519` + `ChaCha20-Poly1305`) on all control, video, input & file channels
-//! - Anti-hijack Relay ownership proof (`KEY=<sha256>`) + sliding-window password brute-force limiter
-//! - Native OS system clipboard integration (`clipboard.rs`)
-//! - Constant-memory 256 KB chunked file upload & download with SHA-256 verification
+//! Cross-platform async Host service (v0.5.0 P2):
+//! - Dual-password E2EE (`token` temporary + optional `unattended_token` permanent password)
+//! - Multi-monitor enumeration & live hot-switching (`MonitorSelect` / `MonitorSelectAck`)
+//! - Real-time delta-only `CursorState` push (`ChannelId::Cursor`)
+//! - Active session audit list + instant `kick_viewers()` owner override
+//! - Anti-hijack Relay ownership proof + sliding-window brute-force limiter + chunked file transfer
 
 use crate::capture::{create_capturer, now_us};
 use crate::clipboard;
 use crate::codec::{encode_full_screenshot, CompoundTileEncoder};
+use crate::cursor;
 use crate::input::{create_injector, InputInjector};
 use ctd_protocol::{
-    accept_e2ee_server, read_frame, read_frame_opt_cipher, write_frame, write_frame_opt_cipher,
-    ChannelId, DownloadChunkReq, HelloAckPayload, HelloPayload, KeyEventPacket, MouseEventPacket,
-    MsgType, SendCipher, UploadChunkMeta, FILE_CHUNK_SIZE,
+    read_frame, read_frame_opt_cipher, write_frame, write_frame_opt_cipher, ChannelId,
+    CursorStatePacket, DownloadChunkReq, HelloAckPayload, HelloPayload, KeyEventPacket,
+    MonitorInfo, MonitorSelectAckPayload, MouseEventPacket, MsgType, SendCipher,
+    ServerE2eeHandshake, UploadChunkMeta, FILE_CHUNK_SIZE,
 };
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,6 +36,8 @@ use tokio::time::{sleep, Duration, Instant};
 pub struct HostConfig {
     pub bind_addr: String,
     pub token: String,
+    #[serde(default)]
+    pub unattended_token: String,
     pub device_id: String,
     #[serde(default)]
     pub device_secret: String,
@@ -53,6 +58,7 @@ impl Default for HostConfig {
         Self {
             bind_addr: "0.0.0.0:19800".to_string(),
             token: "demo123".to_string(),
+            unattended_token: String::new(),
             device_id: "888100200".to_string(),
             device_secret: String::new(),
             device_name: std::env::consts::OS.to_string(),
@@ -80,6 +86,9 @@ pub struct HostStatus {
     pub capture_backend: String,
     pub width: u32,
     pub height: u32,
+    pub monitors: Vec<MonitorInfo>,
+    pub active_monitor: u16,
+    pub active_sessions: Vec<String>,
     pub exec_enabled: bool,
 }
 
@@ -140,6 +149,17 @@ fn constant_time_token_eq(a: &str, b: &str) -> bool {
     diff == 0 && a.len() == b.len()
 }
 
+fn verify_host_token(provided: &str, cfg: &HostConfig) -> bool {
+    if !cfg.token.is_empty() && constant_time_token_eq(provided, &cfg.token) {
+        return true;
+    }
+    let perm = cfg.unattended_token.trim();
+    if !perm.is_empty() && constant_time_token_eq(provided, perm) {
+        return true;
+    }
+    false
+}
+
 fn compute_ownership_proof(device_id: &str, device_secret: &str) -> Option<String> {
     let trimmed = device_secret.trim();
     if trimmed.is_empty() {
@@ -158,18 +178,24 @@ struct SharedState {
     lan_addrs: Vec<String>,
     relay_status: std::sync::RwLock<String>,
     auth_limiter: AuthRateLimiter,
-    width: u32,
-    height: u32,
+    width: AtomicU32,
+    height: AtomicU32,
+    monitors: std::sync::RwLock<Vec<MonitorInfo>>,
+    active_monitor: AtomicU16,
+    requested_monitor: AtomicI32,
+    active_sessions: std::sync::RwLock<HashMap<String, String>>,
     capture_backend: String,
     latest_rgba: RwLock<Vec<u8>>,
     clipboard: RwLock<String>,
     injector: Arc<dyn InputInjector>,
     frame_tx: broadcast::Sender<(u8, Vec<u8>)>,
+    cursor_tx: broadcast::Sender<[u8; 6]>,
     force_keyframe: AtomicBool,
     stream_max_w: AtomicU32,
     stream_quality: AtomicU8,
     running: AtomicBool,
     stop_notify: Notify,
+    kick_notify: Notify,
 }
 
 pub struct HostHandle {
@@ -217,9 +243,17 @@ impl HostHandle {
 
         let lan_addrs = discover_lan_endpoints(&cfg.bind_addr);
         let mut capturer = create_capturer(cfg.force_synthetic);
-        let (width, height) = capturer.dimensions();
+        let (init_w, init_h) = capturer.dimensions();
+        let init_monitors = capturer.monitors();
+        let init_active_mon = capturer.active_monitor();
+        let init_mon_info = capturer.active_monitor_info();
         let capture_backend = capturer.backend_name().to_string();
+
+        let injector = create_injector(cfg.allow_input);
+        injector.set_target_monitor(&init_mon_info);
+
         let (frame_tx, _) = broadcast::channel(3);
+        let (cursor_tx, _) = broadcast::channel(16);
 
         let initial_relay_status = if cfg.relay_addr.as_deref().unwrap_or("").is_empty() {
             "disabled".to_string()
@@ -234,44 +268,92 @@ impl HostHandle {
             lan_addrs,
             relay_status: std::sync::RwLock::new(initial_relay_status),
             auth_limiter: AuthRateLimiter::new(),
-            width,
-            height,
+            width: AtomicU32::new(init_w),
+            height: AtomicU32::new(init_h),
+            monitors: std::sync::RwLock::new(init_monitors),
+            active_monitor: AtomicU16::new(init_active_mon),
+            requested_monitor: AtomicI32::new(-1),
+            active_sessions: std::sync::RwLock::new(HashMap::new()),
             capture_backend,
-            latest_rgba: RwLock::new(vec![0u8; (width * height * 4) as usize]),
+            latest_rgba: RwLock::new(vec![0u8; (init_w * init_h * 4) as usize]),
             clipboard: RwLock::new(String::new()),
-            injector: create_injector(cfg.allow_input),
+            injector,
             frame_tx,
+            cursor_tx,
             force_keyframe: AtomicBool::new(true),
             running: AtomicBool::new(true),
             stop_notify: Notify::new(),
+            kick_notify: Notify::new(),
         });
 
-        // 1. Capture + Incremental Compound Tile Encode loop
+        // 1. Capture + Multi-Monitor Switch + Cursor Delta + Incremental Tile Encode loop
         let cap_state = state.clone();
         std::thread::spawn(move || {
             let interval = Duration::from_millis((1000 / cap_state.cfg.fps.max(1)).max(15) as u64);
+            let mut cur_w = init_w;
+            let mut cur_h = init_h;
             let mut cur_sw = 0u32;
             let mut cur_sh = 0u32;
             let mut cur_q = 0u8;
-            let mut encoder = CompoundTileEncoder::new(width, height, 128, 72, 3);
-            let mut raw_buf = vec![0u8; (width * height * 4) as usize];
+            let mut encoder = CompoundTileEncoder::new(cur_w, cur_h, 128, 72, 3);
+            let mut raw_buf = vec![0u8; (cur_w * cur_h * 4) as usize];
+            let mut last_cursor: Option<CursorStatePacket> = None;
 
             while cap_state.running.load(Ordering::Relaxed) {
                 let t0 = std::time::Instant::now();
+
+                // Check for pending monitor hot-switch request
+                let req_mon = cap_state.requested_monitor.swap(-1, Ordering::AcqRel);
+                if req_mon >= 0 {
+                    if let Some(mon_info) = capturer.select_monitor(req_mon as u16) {
+                        let (nw, nh) = capturer.dimensions();
+                        cur_w = nw;
+                        cur_h = nh;
+                        raw_buf.resize((cur_w * cur_h * 4) as usize, 0);
+                        cap_state.width.store(cur_w, Ordering::Release);
+                        cap_state.height.store(cur_h, Ordering::Release);
+                        cap_state
+                            .active_monitor
+                            .store(mon_info.index, Ordering::Release);
+                        cap_state.injector.set_target_monitor(&mon_info);
+                        if let Ok(mut mg) = cap_state.monitors.write() {
+                            *mg = capturer.monitors();
+                        }
+                        cur_sw = 0; // trigger encoder reset + keyframe
+                        last_cursor = None;
+                        cap_state.force_keyframe.store(true, Ordering::Release);
+                    }
+                }
+
                 let has_subscribers = cap_state.frame_tx.receiver_count() > 0;
+
+                // Sample native OS cursor position & shape (only broadcast 6-byte delta when changed)
+                if has_subscribers {
+                    let active_mon_info = capturer.active_monitor_info();
+                    if let Some(cur_pkt) = cursor::sample_cursor(&active_mon_info) {
+                        if last_cursor != Some(cur_pkt) {
+                            last_cursor = Some(cur_pkt);
+                            let _ = cap_state.cursor_tx.send(cur_pkt.serialize());
+                        }
+                    }
+                }
 
                 if capturer.capture_rgba(&mut raw_buf) {
                     if let Ok(mut guard) = cap_state.latest_rgba.try_write() {
-                        guard.clone_from(&raw_buf);
+                        if guard.len() != raw_buf.len() {
+                            *guard = raw_buf.clone();
+                        } else {
+                            guard.clone_from(&raw_buf);
+                        }
                     }
                     if has_subscribers {
                         let max_w = cap_state.stream_max_w.load(Ordering::Relaxed);
                         let q = cap_state.stream_quality.load(Ordering::Relaxed);
-                        let (sw, sh) = if max_w > 0 && width > max_w {
-                            let nh = ((height as u64 * max_w as u64) / width as u64).max(1) as u32;
+                        let (sw, sh) = if max_w > 0 && cur_w > max_w {
+                            let nh = ((cur_h as u64 * max_w as u64) / cur_w as u64).max(1) as u32;
                             (max_w, nh)
                         } else {
-                            (width, height)
+                            (cur_w, cur_h)
                         };
 
                         let mut force_kf = cap_state.force_keyframe.swap(false, Ordering::AcqRel);
@@ -283,22 +365,22 @@ impl HostHandle {
                             force_kf = true;
                         }
 
-                        let scaled_cow: std::borrow::Cow<'_, [u8]> = if sw == width && sh == height
-                        {
-                            std::borrow::Cow::Borrowed(&raw_buf)
-                        } else if let Some(img) =
-                            RgbaImage::from_raw(width, height, raw_buf.clone())
-                        {
-                            let r = image::imageops::resize(
-                                &img,
-                                sw,
-                                sh,
-                                image::imageops::FilterType::Nearest,
-                            );
-                            std::borrow::Cow::Owned(r.into_raw())
-                        } else {
-                            std::borrow::Cow::Borrowed(&raw_buf)
-                        };
+                        let scaled_cow: std::borrow::Cow<'_, [u8]> =
+                            if sw == cur_w && sh == cur_h {
+                                std::borrow::Cow::Borrowed(&raw_buf)
+                            } else if let Some(img) =
+                                RgbaImage::from_raw(cur_w, cur_h, raw_buf.clone())
+                            {
+                                let r = image::imageops::resize(
+                                    &img,
+                                    sw,
+                                    sh,
+                                    image::imageops::FilterType::Nearest,
+                                );
+                                std::borrow::Cow::Owned(r.into_raw())
+                            } else {
+                                std::borrow::Cow::Borrowed(&raw_buf)
+                            };
 
                         if scaled_cow.len() == (sw * sh * 4) as usize {
                             let (pkt, flags) = encoder.encode_rgba(&scaled_cow, now_us(), force_kf);
@@ -358,6 +440,18 @@ impl HostHandle {
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
+        let monitors = self
+            .state
+            .monitors
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let active_sessions = self
+            .state
+            .active_sessions
+            .read()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default();
         HostStatus {
             running: self.state.running.load(Ordering::Relaxed),
             device_id: self.state.cfg.device_id.clone(),
@@ -366,14 +460,22 @@ impl HostHandle {
             relay_addr: self.state.cfg.relay_addr.clone(),
             relay_status,
             capture_backend: self.state.capture_backend.clone(),
-            width: self.state.width,
-            height: self.state.height,
+            width: self.state.width.load(Ordering::Relaxed),
+            height: self.state.height.load(Ordering::Relaxed),
+            monitors,
+            active_monitor: self.state.active_monitor.load(Ordering::Relaxed),
+            active_sessions,
             exec_enabled: self.state.cfg.allow_exec,
         }
     }
 
+    pub fn kick_viewers(&self) {
+        self.state.kick_notify.notify_waiters();
+    }
+
     pub fn stop(&self) {
         self.state.running.store(false, Ordering::Release);
+        self.state.kick_notify.notify_waiters();
         self.state.stop_notify.notify_waiters();
     }
 }
@@ -498,7 +600,6 @@ async fn relay_loop(state: Arc<SharedState>, relay_addr: String) {
 type WriterGuard = Arc<Mutex<(tokio::net::tcp::OwnedWriteHalf, u32, Option<SendCipher>)>>;
 
 async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
-    // Reject immediately during brute-force lockout cooldown
     if state.auth_limiter.is_locked_out() {
         return;
     }
@@ -513,22 +614,24 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
 
     let (mut rx_cipher, tx_cipher, hello) = match first_hdr.msg_type {
         MsgType::E2eeInit => {
-            let Ok((ack_payload, send_c, mut recv_c)) =
-                accept_e2ee_server(&first_payload, &state.cfg.token)
-            else {
+            let Ok((pending_hs, ack_payload)) = ServerE2eeHandshake::begin(&first_payload) else {
                 return;
             };
-            if write_frame(&mut wr_raw, MsgType::E2eeAck, ChannelId::Control, 0, 1, &ack_payload)
-                .await
-                .is_err()
+            if write_frame(
+                &mut wr_raw,
+                MsgType::E2eeAck,
+                ChannelId::Control,
+                0,
+                1,
+                &ack_payload,
+            )
+            .await
+            .is_err()
             {
                 return;
             }
-            let Ok(Ok((h_hdr, h_pt))) = tokio::time::timeout(
-                Duration::from_secs(6),
-                read_frame_opt_cipher(&mut rd, Some(&mut recv_c)),
-            )
-            .await
+            let Ok(Ok((h_hdr, h_ct))) =
+                tokio::time::timeout(Duration::from_secs(6), read_frame(&mut rd)).await
             else {
                 state.auth_limiter.record_failure();
                 return;
@@ -537,6 +640,20 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                 state.auth_limiter.record_failure();
                 return;
             }
+            // Try temporary token first, then optional unattended permanent token
+            let mut opened_opt = pending_hs
+                .try_open_first_frame(&state.cfg.token, &h_hdr, &h_ct)
+                .ok();
+            if opened_opt.is_none() {
+                let perm = state.cfg.unattended_token.trim();
+                if !perm.is_empty() {
+                    opened_opt = pending_hs.try_open_first_frame(perm, &h_hdr, &h_ct).ok();
+                }
+            }
+            let Some((send_c, recv_c, h_pt)) = opened_opt else {
+                state.auth_limiter.record_failure();
+                return;
+            };
             let Ok(hello) = serde_json::from_slice::<HelloPayload>(&h_pt) else {
                 state.auth_limiter.record_failure();
                 return;
@@ -552,19 +669,25 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
         _ => return,
     };
 
-    if !constant_time_token_eq(&hello.token, &state.cfg.token) {
+    if !verify_host_token(&hello.token, &state.cfg) {
         state.auth_limiter.record_failure();
         return;
     }
     state.auth_limiter.record_success();
 
+    let session_id = format!("{:08x}", rand::random::<u32>());
     let is_e2ee = tx_cipher.is_some();
     let wr: WriterGuard = Arc::new(Mutex::new((wr_raw, 1u32, tx_cipher)));
 
+    let monitors = state
+        .monitors
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
     let ack = HelloAckPayload {
-        session_id: format!("{:08x}", rand::random::<u32>()),
-        width: state.width as u16,
-        height: state.height as u16,
+        session_id: session_id.clone(),
+        width: state.width.load(Ordering::Relaxed) as u16,
+        height: state.height.load(Ordering::Relaxed) as u16,
         tile_size: 128,
         capture_backend: state.capture_backend.clone(),
         input_backend: state.injector.backend_name().to_string(),
@@ -574,6 +697,8 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
             "arch": std::env::consts::ARCH,
             "e2ee": is_e2ee
         }),
+        monitors,
+        active_monitor: state.active_monitor.load(Ordering::Relaxed),
     };
     let ack_bytes = serde_json::to_vec(&ack).unwrap_or_default();
     if send_locked(&wr, MsgType::HelloAck, ChannelId::Control, 0, &ack_bytes)
@@ -583,24 +708,37 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
         return;
     }
 
-    let mut rx = state.frame_tx.subscribe();
+    if let Ok(mut sg) = state.active_sessions.write() {
+        sg.insert(session_id.clone(), hello.client_name.clone());
+    }
+
+    let mut rx_vid = state.frame_tx.subscribe();
+    let mut rx_cur = state.cursor_tx.subscribe();
     state.force_keyframe.store(true, Ordering::Release);
 
-    let wr_vid = wr.clone();
-    let st_vid = state.clone();
-    let vid_task = tokio::spawn(async move {
+    let wr_push = wr.clone();
+    let st_push = state.clone();
+    let push_task = tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = st_vid.stop_notify.notified() => break,
-                recv_res = rx.recv() => {
+                _ = st_push.stop_notify.notified() => break,
+                _ = st_push.kick_notify.notified() => break,
+                cur_res = rx_cur.recv() => {
+                    if let Ok(cur_bytes) = cur_res {
+                        if send_locked(&wr_push, MsgType::CursorState, ChannelId::Cursor, 0, &cur_bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                recv_res = rx_vid.recv() => {
                     match recv_res {
                         Ok((flags, data)) => {
-                            if send_locked(&wr_vid, MsgType::VideoTileFrame, ChannelId::Video, flags, &data).await.is_err() {
+                            if send_locked(&wr_push, MsgType::VideoTileFrame, ChannelId::Video, flags, &data).await.is_err() {
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            st_vid.force_keyframe.store(true, Ordering::Release);
+                            st_push.force_keyframe.store(true, Ordering::Release);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -612,6 +750,7 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
     loop {
         let frame_res = tokio::select! {
             _ = state.stop_notify.notified() => break,
+            _ = state.kick_notify.notified() => break,
             r = read_frame_opt_cipher(&mut rd, rx_cipher.as_mut()) => r,
         };
         let Ok((hdr, payload)) = frame_res else { break };
@@ -632,6 +771,57 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                 }
                 state.force_keyframe.store(true, Ordering::Release);
             }
+            MsgType::MonitorSelect if payload.len() >= 2 => {
+                let target_idx = u16::from_le_bytes([payload[0], payload[1]]);
+                let monitors = state
+                    .monitors
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let resp = if let Some(found) = monitors.iter().find(|m| m.index == target_idx) {
+                    state.active_monitor.store(target_idx, Ordering::Release);
+                    state.injector.set_target_monitor(found);
+                    state
+                        .requested_monitor
+                        .store(target_idx as i32, Ordering::Release);
+                    // Wait briefly (up to 60ms) so capture thread updates actual pixel width/height
+                    for _ in 0..6 {
+                        if state.requested_monitor.load(Ordering::Acquire) < 0 {
+                            break;
+                        }
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                    MonitorSelectAckPayload {
+                        ok: true,
+                        active_monitor: state.active_monitor.load(Ordering::Relaxed),
+                        width: state.width.load(Ordering::Relaxed) as u16,
+                        height: state.height.load(Ordering::Relaxed) as u16,
+                        monitors: state
+                            .monitors
+                            .read()
+                            .map(|g| g.clone())
+                            .unwrap_or(monitors),
+                    }
+                } else {
+                    MonitorSelectAckPayload {
+                        ok: false,
+                        active_monitor: state.active_monitor.load(Ordering::Relaxed),
+                        width: state.width.load(Ordering::Relaxed) as u16,
+                        height: state.height.load(Ordering::Relaxed) as u16,
+                        monitors,
+                    }
+                };
+                if let Ok(bytes) = serde_json::to_vec(&resp) {
+                    let _ = send_locked(
+                        &wr,
+                        MsgType::MonitorSelectAck,
+                        ChannelId::Control,
+                        0,
+                        &bytes,
+                    )
+                    .await;
+                }
+            }
             MsgType::MouseEvent => {
                 if let Ok(ev) = MouseEventPacket::deserialize(&payload) {
                     state.injector.inject_mouse(ev);
@@ -647,7 +837,8 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                 let quality = payload[2];
                 let as_png = payload[3] == 1;
                 let rgba = state.latest_rgba.read().await.clone();
-                let (w, h) = (state.width, state.height);
+                let w = state.width.load(Ordering::Relaxed);
+                let h = state.height.load(Ordering::Relaxed);
                 if let Ok(Ok((ow, oh, img))) = tokio::task::spawn_blocking(move || {
                     encode_full_screenshot(&rgba, w, h, max_w, quality, as_png)
                 })
@@ -763,7 +954,10 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
         }
     }
 
-    vid_task.abort();
+    push_task.abort();
+    if let Ok(mut sg) = state.active_sessions.write() {
+        sg.remove(&session_id);
+    }
 }
 
 async fn send_locked(
@@ -919,7 +1113,6 @@ fn handle_file_upload_chunk(root: &Path, payload: &[u8]) -> String {
         .to_string();
     }
 
-    // Streaming SHA-256 verification across `.ctdpart` without loading the full file into memory
     let Ok(mut rf) = std::fs::File::open(&part_path) else {
         return serde_json::json!({ "ok": false, "error": "Failed to reopen part file" }).to_string();
     };
@@ -1000,13 +1193,6 @@ fn encode_download_chunk_err(msg: &str) -> Vec<u8> {
     out
 }
 
-/// Binary layout of `FileDownloadChunkResp` (`0x69`):
-/// - `[0]`: `1` = ok, `0` = error (`[1..]` = UTF-8 error string)
-/// - `[1..9]`: `total_size` (`u64` LE)
-/// - `[9..17]`: `offset` (`u64` LE)
-/// - `[17]`: `eof` (`1` or `0`)
-/// - `[18..50]`: `chunk_sha256` (`[u8; 32]` raw SHA-256 of `chunk_data`)
-/// - `[50..]`: `chunk_data`
 fn handle_file_download_chunk(root: &Path, payload: &[u8]) -> Vec<u8> {
     let Ok(req) = serde_json::from_slice::<DownloadChunkReq>(payload) else {
         return encode_download_chunk_err("Invalid download request JSON");

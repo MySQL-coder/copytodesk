@@ -1,10 +1,16 @@
-//! Cross-platform screen capture abstraction with automatic fallback to zero-GPU synthetic pattern.
+//! Cross-platform multi-monitor screen capture with live display switching (v0.5.0 P2)
+//! and automatic fallback to zero-GPU synthetic dual-monitor pattern on headless environments.
 
+use ctd_protocol::MonitorInfo;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait ScreenCapturer: Send {
     fn backend_name(&self) -> &'static str;
     fn dimensions(&self) -> (u32, u32);
+    fn monitors(&self) -> Vec<MonitorInfo>;
+    fn active_monitor(&self) -> u16;
+    fn active_monitor_info(&self) -> MonitorInfo;
+    fn select_monitor(&mut self, index: u16) -> Option<MonitorInfo>;
     /// Writes RGBA8 pixels (`width * height * 4`) into `buf`. Returns `true` if a new frame was captured.
     fn capture_rgba(&mut self, buf: &mut Vec<u8>) -> bool;
 }
@@ -16,8 +22,10 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-/// Zero-GPU deterministic test pattern generator for headless VPS / CI / fallback mode.
+/// Zero-GPU deterministic dual-monitor test pattern generator for headless VPS / CI / fallback mode.
 pub struct SyntheticCapturer {
+    monitors: Vec<MonitorInfo>,
+    active_idx: u16,
     width: u32,
     height: u32,
     tick: u32,
@@ -25,7 +33,33 @@ pub struct SyntheticCapturer {
 
 impl SyntheticCapturer {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height, tick: 0 }
+        let monitors = vec![
+            MonitorInfo {
+                index: 0,
+                name: "Synthetic Primary".to_string(),
+                x: 0,
+                y: 0,
+                width,
+                height,
+                is_primary: true,
+            },
+            MonitorInfo {
+                index: 1,
+                name: "Synthetic Secondary".to_string(),
+                x: width as i32,
+                y: 0,
+                width: 1024,
+                height: 768,
+                is_primary: false,
+            },
+        ];
+        Self {
+            monitors,
+            active_idx: 0,
+            width,
+            height,
+            tick: 0,
+        }
     }
 }
 
@@ -38,13 +72,40 @@ impl ScreenCapturer for SyntheticCapturer {
         (self.width, self.height)
     }
 
+    fn monitors(&self) -> Vec<MonitorInfo> {
+        self.monitors.clone()
+    }
+
+    fn active_monitor(&self) -> u16 {
+        self.active_idx
+    }
+
+    fn active_monitor_info(&self) -> MonitorInfo {
+        self.monitors
+            .get(self.active_idx as usize)
+            .cloned()
+            .unwrap_or_else(|| self.monitors[0].clone())
+    }
+
+    fn select_monitor(&mut self, index: u16) -> Option<MonitorInfo> {
+        let m = self.monitors.get(index as usize)?.clone();
+        self.active_idx = index;
+        self.width = m.width;
+        self.height = m.height;
+        self.tick = 0;
+        Some(m)
+    }
+
     fn capture_rgba(&mut self, buf: &mut Vec<u8>) -> bool {
         self.tick = self.tick.wrapping_add(1);
         let w = self.width as usize;
         let h = self.height as usize;
         buf.resize(w * h * 4, 255);
 
-        // Dark slate background with moving accent block along bottom strip (top stays static for Pass-2 refinement)
+        let accent_r = if self.active_idx == 0 { 64 } else { 16 };
+        let accent_g = if self.active_idx == 0 { 158 } else { 185 };
+        let accent_b = if self.active_idx == 0 { 255 } else { 129 };
+
         if self.tick == 1 {
             for y in 0..h {
                 for x in 0..w {
@@ -55,8 +116,7 @@ impl ScreenCapturer for SyntheticCapturer {
                     buf[o + 3] = 255;
                 }
             }
-            // High-contrast static grid lines on upper region
-            for y in (40..280).step_by(32) {
+            for y in (40..280.min(h)).step_by(32) {
                 for x in 40..640.min(w) {
                     let o = (y * w + x) * 4;
                     buf[o] = 210;
@@ -80,9 +140,9 @@ impl ScreenCapturer for SyntheticCapturer {
         for y in (strip_y + 20)..(strip_y + 110).min(h) {
             for x in bx..(bx + 90).min(w) {
                 let o = (y * w + x) * 4;
-                buf[o] = 64;
-                buf[o + 1] = 158;
-                buf[o + 2] = 255;
+                buf[o] = accent_r;
+                buf[o + 1] = accent_g;
+                buf[o + 2] = accent_b;
                 buf[o + 3] = 255;
             }
         }
@@ -92,27 +152,68 @@ impl ScreenCapturer for SyntheticCapturer {
 
 #[cfg(feature = "native-capture")]
 pub struct NativeXcapCapturer {
+    monitors: Vec<MonitorInfo>,
+    active_idx: u16,
     width: u32,
     height: u32,
 }
 
 #[cfg(feature = "native-capture")]
+fn enumerate_xcap_monitors() -> Option<Vec<(MonitorInfo, (u32, u32))>> {
+    let raw = xcap::Monitor::all().ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    for (idx, m) in raw.into_iter().enumerate() {
+        let (cap_w, cap_h) = match m.capture_image() {
+            Ok(img) if img.width() > 0 && img.height() > 0 => (img.width(), img.height()),
+            _ => (m.width(), m.height()),
+        };
+        if cap_w == 0 || cap_h == 0 {
+            continue;
+        }
+        let raw_name = format!("{}", m.name());
+        let label = if raw_name.trim().is_empty() {
+            format!("Display {}", idx + 1)
+        } else {
+            raw_name
+        };
+        let info = MonitorInfo {
+            index: idx as u16,
+            name: label,
+            x: m.x(),
+            y: m.y(),
+            width: m.width().max(1),
+            height: m.height().max(1),
+            is_primary: m.is_primary(),
+        };
+        out.push((info, (cap_w, cap_h)));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+#[cfg(feature = "native-capture")]
 impl NativeXcapCapturer {
     pub fn try_new() -> Option<Self> {
-        let monitors = xcap::Monitor::all().ok()?;
-        let monitor = monitors
-            .into_iter()
-            .find(|m| m.is_primary())
-            .or_else(|| xcap::Monitor::all().ok()?.into_iter().next())?;
-        // Probe actual captured image dimensions so High-DPI Windows scaling always matches raw buffer size
-        let (width, height) = match monitor.capture_image() {
-            Ok(img) if img.width() > 0 && img.height() > 0 => (img.width(), img.height()),
-            _ => (monitor.width(), monitor.height()),
-        };
-        if width == 0 || height == 0 {
-            return None;
-        }
-        Some(Self { width, height })
+        let probed = enumerate_xcap_monitors()?;
+        let primary_pos = probed
+            .iter()
+            .position(|(info, _)| info.is_primary)
+            .unwrap_or(0);
+        let (_, (width, height)) = probed[primary_pos];
+        let active_idx = probed[primary_pos].0.index;
+        let monitors = probed.into_iter().map(|(info, _)| info).collect();
+        Some(Self {
+            monitors,
+            active_idx,
+            width,
+            height,
+        })
     }
 }
 
@@ -120,24 +221,70 @@ impl NativeXcapCapturer {
 impl ScreenCapturer for NativeXcapCapturer {
     fn backend_name(&self) -> &'static str {
         #[cfg(target_os = "windows")]
-        { "Win-Native-Capture" }
+        {
+            "Win-Native-Capture"
+        }
         #[cfg(target_os = "macos")]
-        { "macOS-Native-Capture" }
+        {
+            "macOS-Native-Capture"
+        }
         #[cfg(target_os = "linux")]
-        { "Linux-Native-Capture" }
+        {
+            "Linux-Native-Capture"
+        }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        { "Native-Capture" }
+        {
+            "Native-Capture"
+        }
     }
 
     fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
+    fn monitors(&self) -> Vec<MonitorInfo> {
+        self.monitors.clone()
+    }
+
+    fn active_monitor(&self) -> u16 {
+        self.active_idx
+    }
+
+    fn active_monitor_info(&self) -> MonitorInfo {
+        self.monitors
+            .iter()
+            .find(|m| m.index == self.active_idx)
+            .cloned()
+            .or_else(|| self.monitors.first().cloned())
+            .unwrap_or(MonitorInfo {
+                index: 0,
+                name: "Primary".into(),
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+                is_primary: true,
+            })
+    }
+
+    fn select_monitor(&mut self, index: u16) -> Option<MonitorInfo> {
+        let probed = enumerate_xcap_monitors()?;
+        let found = probed.iter().find(|(info, _)| info.index == index)?.clone();
+        self.monitors = probed.into_iter().map(|(info, _)| info).collect();
+        self.active_idx = found.0.index;
+        self.width = found.1 .0;
+        self.height = found.1 .1;
+        Some(found.0)
+    }
+
     fn capture_rgba(&mut self, buf: &mut Vec<u8>) -> bool {
-        let Ok(monitors) = xcap::Monitor::all() else { return false };
+        let Ok(monitors) = xcap::Monitor::all() else {
+            return false;
+        };
+        let idx = self.active_idx as usize;
         let Some(monitor) = monitors
             .into_iter()
-            .find(|m| m.is_primary())
+            .nth(idx)
             .or_else(|| xcap::Monitor::all().ok().and_then(|v| v.into_iter().next()))
         else {
             return false;
@@ -147,7 +294,13 @@ impl ScreenCapturer for NativeXcapCapturer {
             let raw = if img.width() == self.width && img.height() == self.height {
                 img.into_raw()
             } else {
-                image::imageops::resize(&img, self.width, self.height, image::imageops::FilterType::Triangle).into_raw()
+                image::imageops::resize(
+                    &img,
+                    self.width,
+                    self.height,
+                    image::imageops::FilterType::Triangle,
+                )
+                .into_raw()
             };
             if raw.len() == expected {
                 *buf = raw;
