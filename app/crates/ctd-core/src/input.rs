@@ -252,6 +252,11 @@ mod mac_input {
     const K_CG_EVENT_OTHER_MOUSE_UP: u32 = 26;
     const K_CG_HID_EVENT_TAP: u32 = 0;
 
+    const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
+    const K_CG_EVENT_FLAG_MASK_CONTROL: u64 = 0x0004_0000;
+    const K_CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x0008_0000;
+    const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGMainDisplayID() -> u32;
@@ -268,6 +273,7 @@ mod mac_input {
             virtual_key: u16,
             key_down: bool,
         ) -> *mut c_void;
+        fn CGEventSetFlags(event: *mut c_void, flags: u64);
         fn CGEventKeyboardSetUnicodeString(
             event: *mut c_void,
             string_length: usize,
@@ -292,6 +298,7 @@ mod mac_input {
     pub struct MacCoreGraphicsInjector {
         count: AtomicU64,
         left_down: AtomicBool,
+        mod_flags: AtomicU64,
     }
 
     impl MacCoreGraphicsInjector {
@@ -358,6 +365,18 @@ mod mac_input {
             0x58 => Some(7),  // X
             0x59 => Some(16), // Y
             0x5A => Some(6),  // Z
+            0x30 => Some(29), // 0
+            0x31 => Some(18), // 1
+            0x32 => Some(19), // 2
+            0x33 => Some(20), // 3
+            0x34 => Some(21), // 4
+            0x35 => Some(23), // 5
+            0x36 => Some(22), // 6
+            0x37 => Some(26), // 7
+            0x38 => Some(28), // 8
+            0x39 => Some(25), // 9
+            0xBD => Some(27), // -
+            0xBB => Some(24), // =
             _ => None,
         }
     }
@@ -436,8 +455,38 @@ mod mac_input {
                 }
                 if let Some(kc) = win_vk_to_mac_keycode(ev.vk) {
                     let down = ev.action == 0;
+                    let mod_bit = match ev.vk {
+                        0x10 => K_CG_EVENT_FLAG_MASK_SHIFT,
+                        0x11 => K_CG_EVENT_FLAG_MASK_CONTROL,
+                        0x12 => K_CG_EVENT_FLAG_MASK_ALTERNATE,
+                        0x5B | 0x5C => K_CG_EVENT_FLAG_MASK_COMMAND,
+                        _ => 0,
+                    };
+                    let mut cur_flags = if mod_bit != 0 {
+                        if down {
+                            self.mod_flags.fetch_or(mod_bit, Ordering::Relaxed) | mod_bit
+                        } else {
+                            self.mod_flags.fetch_and(!mod_bit, Ordering::Relaxed) & !mod_bit
+                        }
+                    } else {
+                        self.mod_flags.load(Ordering::Relaxed)
+                    };
+                    if (ev.flags & ctd_protocol::key_mod_flags::SHIFT) != 0 {
+                        cur_flags |= K_CG_EVENT_FLAG_MASK_SHIFT;
+                    }
+                    if (ev.flags & ctd_protocol::key_mod_flags::CTRL) != 0 {
+                        cur_flags |= K_CG_EVENT_FLAG_MASK_CONTROL;
+                    }
+                    if (ev.flags & ctd_protocol::key_mod_flags::ALT) != 0 {
+                        cur_flags |= K_CG_EVENT_FLAG_MASK_ALTERNATE;
+                    }
+                    if (ev.flags & ctd_protocol::key_mod_flags::META) != 0 {
+                        cur_flags |= K_CG_EVENT_FLAG_MASK_COMMAND;
+                    }
+
                     let e = CGEventCreateKeyboardEvent(std::ptr::null(), kc, down);
                     if !e.is_null() {
+                        CGEventSetFlags(e, cur_flags);
                         CGEventPost(K_CG_HID_EVENT_TAP, e);
                         CFRelease(e);
                     }

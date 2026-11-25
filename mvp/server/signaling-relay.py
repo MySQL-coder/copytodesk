@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-CopyToDesk Zero-Dependency Python 3.10+ Signaling + TCP Relay + Cross-Platform Web Viewer
+CopyToDesk Zero-Dependency Python 3.10+ Signaling + TCP Relay + Cross-Platform Web Viewer (v0.4.0 P1)
 Protocol-identical to `signaling-relay.mjs`:
   - TCP Relay (--relay-port 19901):
-      Host Control:  REGISTER <deviceId> <name>\n  ->  OK REGISTERED <deviceId>\n
+      Host Control:  REGISTER <deviceId> <name> [LAN=...] [KEY=<proof>]\n
+                       -> OK REGISTERED <deviceId>\n
+                       -> ERR ALREADY_OWNED\n  (anti-hijack device ownership binding!)
                      <- INCOMING <sessionId>\n
-      Host Data:     ACCEPT <sessionId>\n          ->  OK TUNNEL\n  (transparent CTD1 pipe)
-      Client/Viewer: CONNECT <deviceId>\n          ->  OK TUNNEL\n  (transparent CTD1 pipe)
-  - HTTP Signaling & Web Viewer (--http-port 19900):
-      GET /               -> Unified ToDesk-style Zero-GPU Canvas2D UI (ui/index.html)
-      GET /app.js         -> Unified UI script (ui/app.js)
-      GET /api/devices    -> JSON online registered devices
-      GET /api/health     -> Health & relay metrics
-      POST /api/screenshot, /api/input, /api/clipboard, /api/files, /api/exec
+                     PING\n -> PONG\n
+      Host Data:     ACCEPT <sessionId>\n  ->  OK TUNNEL\n  (transparent E2EE CTD1 pipe)
+      Client/Viewer: LOOKUP <deviceId>\n   ->  OK LAN <ip1:port,...>\n
+                     CONNECT <deviceId>\n  ->  OK TUNNEL\n  (transparent E2EE CTD1 pipe)
 """
 import argparse
 import asyncio
@@ -30,8 +28,35 @@ MAGIC = 0x31445443  # "CTD1" LE
 
 hosts = {}            # device_id -> dict(deviceId, name, writer, registeredAt, remoteAddr)
 pending_sessions = {} # session_id -> dict(reader, writer, device_id, fut)
-stats = {"totalTunnels": 0, "totalBytesRelayed": 0}
-UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+stats = {"totalTunnels": 0, "totalBytesRelayed": 0, "hijackBlocks": 0}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UI_DIR = os.path.join(BASE_DIR, "ui")
+OWNERS_FILE = os.path.join(BASE_DIR, "device_owners.json")
+
+
+def load_device_owners() -> dict:
+    if os.path.exists(OWNERS_FILE):
+        try:
+            with open(OWNERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            print(f"[Relay] Warn loading device_owners.json: {e}", flush=True)
+    return {}
+
+
+def save_device_owners(owners: dict):
+    tmp = OWNERS_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(owners, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, OWNERS_FILE)
+    except Exception as e:
+        print(f"[Relay] Warn saving device_owners.json: {e}", flush=True)
+
+
+device_owners = load_device_owners()
 
 
 def set_nodelay(writer):
@@ -108,13 +133,34 @@ async def handle_relay_client(reader: asyncio.StreamReader, writer: asyncio.Stre
         if cmd == "REGISTER" and len(parts) >= 2:
             device_id = parts[1]
             lan_addrs = []
+            key_proof = ""
             name_parts = []
             for tok in parts[2:]:
-                if tok.upper().startswith("LAN="):
+                up = tok.upper()
+                if up.startswith("LAN="):
                     lan_addrs = [x.strip() for x in tok[4:].split(",") if x.strip()]
+                elif up.startswith("KEY="):
+                    key_proof = tok[4:].strip()
                 else:
                     name_parts.append(tok)
             name = " ".join(name_parts) if name_parts else "Host"
+
+            # Anti-Hijack Device Ownership Verification
+            key_hash = hashlib.sha256(key_proof.encode("utf-8")).hexdigest() if key_proof else ""
+            existing_owner = device_owners.get(device_id)
+            if existing_owner:
+                if not key_hash or not secrets.compare_digest(existing_owner, key_hash):
+                    stats["hijackBlocks"] += 1
+                    print(f"[Relay] BLOCKED hijack attempt on owned deviceId={device_id}", flush=True)
+                    writer.write(b"ERR ALREADY_OWNED\n")
+                    await writer.drain()
+                    writer.close()
+                    return
+            elif key_hash:
+                device_owners[device_id] = key_hash
+                save_device_owners(device_owners)
+                print(f"[Relay] Bound new device ownership: deviceId={device_id}", flush=True)
+
             old = hosts.get(device_id)
             if old:
                 try:
@@ -127,6 +173,7 @@ async def handle_relay_client(reader: asyncio.StreamReader, writer: asyncio.Stre
                 "deviceId": device_id,
                 "name": name,
                 "lanAddrs": lan_addrs,
+                "owned": device_id in device_owners,
                 "writer": writer,
                 "registeredAt": now_iso,
                 "lastSeenAt": now_iso,
@@ -135,7 +182,10 @@ async def handle_relay_client(reader: asyncio.StreamReader, writer: asyncio.Stre
             hosts[device_id] = info
             writer.write(f"OK REGISTERED {device_id}\n".encode("utf-8"))
             await writer.drain()
-            print(f"[Relay] Host registered: deviceId={device_id} name={name} lan={lan_addrs}", flush=True)
+            print(
+                f"[Relay] Host registered: deviceId={device_id} name={name} lan={lan_addrs} owned={info['owned']}",
+                flush=True,
+            )
             try:
                 while True:
                     hb_raw = await asyncio.wait_for(reader.readline(), timeout=70.0)
@@ -208,7 +258,6 @@ async def handle_relay_client(reader: asyncio.StreamReader, writer: asyncio.Stre
                 writer.close()
                 return
             pending["fut"].set_result((reader, writer))
-            # Keep coroutine alive until writer closes (bridged by CONNECT task)
             while not writer.is_closing():
                 await asyncio.sleep(1.0)
             return
@@ -313,6 +362,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 {
                     "deviceId": h["deviceId"],
                     "name": h["name"],
+                    "owned": h.get("owned", False),
                     "lanAddrs": h.get("lanAddrs", []),
                     "registeredAt": h["registeredAt"],
                     "lastSeenAt": h.get("lastSeenAt", h["registeredAt"]),
@@ -321,7 +371,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             ]
             writer.write(http_response("200 OK", "application/json", json.dumps({"devices": devs}).encode("utf-8")))
         elif method == "GET" and path == "/api/health":
-            out = {"status": "ok", "onlineHosts": len(hosts), **stats}
+            out = {"status": "ok", "version": "0.4.0", "onlineHosts": len(hosts), "ownedDevices": len(device_owners), **stats}
             writer.write(http_response("200 OK", "application/json", json.dumps(out).encode("utf-8")))
         elif method == "POST" and path == "/api/screenshot":
             b = json.loads(body_raw.decode("utf-8"))
@@ -371,6 +421,23 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                     payload = struct.pack("<H", len(rel)) + rel + sha + data
                     await ctd_send(w, 0x62, 5, payload, 2)
                     resp = await wait_ctd_msg(r, 0x63)
+                elif b.get("action") == "download":
+                    rel = str(b.get("remotePath", "")).encode("utf-8")
+                    await ctd_send(w, 0x64, 5, rel, 2)
+                    raw = await wait_ctd_msg(r, 0x65)
+                    if not raw or raw[0] == 0:
+                        err_len = struct.unpack_from("<H", raw, 65)[0] if len(raw) >= 67 else 0
+                        err_msg = raw[67:67 + err_len].decode("utf-8", errors="replace") if err_len else "Download failed"
+                        resp = json.dumps({"ok": False, "error": err_msg}).encode("utf-8")
+                    else:
+                        sha_hex = raw[1:65].decode("ascii", errors="replace")
+                        file_bytes = raw[67:]
+                        resp = json.dumps({
+                            "ok": True,
+                            "sha256": sha_hex,
+                            "bytes": len(file_bytes),
+                            "contentBase64": base64.b64encode(file_bytes).decode("ascii"),
+                        }).encode("utf-8")
                 else:
                     await ctd_send(w, 0x60, 5, str(b.get("remotePath", "")).encode("utf-8"), 2)
                     resp = await wait_ctd_msg(r, 0x61)
@@ -412,8 +479,8 @@ async def main():
 
     relay_srv = await asyncio.start_server(handle_relay_client, args.bind, args.relay_port)
     http_srv = await asyncio.start_server(lambda r, w: handle_http(r, w, args.relay_port), args.bind, args.http_port)
-    print(f"[SignalingRelay-Py] TCP Relay listening on {args.bind}:{args.relay_port}", flush=True)
-    print(f"[SignalingRelay-Py] HTTP Web Viewer listening on http://{args.bind}:{args.http_port}", flush=True)
+    print(f"[SignalingRelay-Py v0.4.0] TCP Relay listening on {args.bind}:{args.relay_port}", flush=True)
+    print(f"[SignalingRelay-Py v0.4.0] HTTP Web Viewer listening on http://{args.bind}:{args.http_port}", flush=True)
     async with relay_srv, http_srv:
         await asyncio.gather(relay_srv.serve_forever(), http_srv.serve_forever())
 

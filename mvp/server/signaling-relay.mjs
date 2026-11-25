@@ -33,6 +33,26 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UNIFIED_UI_PATH = path.resolve(__dirname, '..', '..', 'app', 'ui', 'index.html');
 const UNIFIED_JS_PATH = path.resolve(__dirname, '..', '..', 'app', 'ui', 'app.js');
+const OWNERS_PATH = path.resolve(__dirname, 'device_owners.json');
+
+function loadDeviceOwners() {
+  try {
+    if (fs.existsSync(OWNERS_PATH)) {
+      return new Map(Object.entries(JSON.parse(fs.readFileSync(OWNERS_PATH, 'utf8'))));
+    }
+  } catch {}
+  return new Map();
+}
+
+function saveDeviceOwners(map) {
+  try {
+    const tmp = OWNERS_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(map), null, 2));
+    fs.renameSync(tmp, OWNERS_PATH);
+  } catch {}
+}
+
+const deviceOwners = loadDeviceOwners();
 
 function parseArgs(argv) {
   const cfg = {
@@ -142,13 +162,29 @@ const relayServer = net.createServer(async (sock) => {
     if (cmd === 'REGISTER' && parts[1]) {
       const deviceId = parts[1];
       let lanAddrs = [];
+      let keyProof = '';
       const nameParts = [];
       for (const tok of parts.slice(2)) {
-        if (tok.toUpperCase().startsWith('LAN=')) {
+        const up = tok.toUpperCase();
+        if (up.startsWith('LAN=')) {
           lanAddrs = tok.slice(4).split(',').map((s) => s.trim()).filter(Boolean);
+        } else if (up.startsWith('KEY=')) {
+          keyProof = tok.slice(4).trim();
         } else {
           nameParts.push(tok);
         }
+      }
+      const keyHash = keyProof ? crypto.createHash('sha256').update(keyProof, 'utf8').digest('hex') : '';
+      const existingOwner = deviceOwners.get(deviceId);
+      if (existingOwner) {
+        if (!keyHash || existingOwner !== keyHash) {
+          sock.write('ERR ALREADY_OWNED\n');
+          sock.end();
+          return;
+        }
+      } else if (keyHash) {
+        deviceOwners.set(deviceId, keyHash);
+        saveDeviceOwners(deviceOwners);
       }
       const name = nameParts.join(' ') || 'Host';
       const old = hosts.get(deviceId);

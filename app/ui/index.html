@@ -32,7 +32,7 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  /* Left Navigation Rail (ToDesk-inspired) */
+  /* Left Navigation Rail */
   .rail {
     width: 212px; flex-shrink: 0; background: var(--sidebar);
     border-right: 1px solid var(--border);
@@ -89,7 +89,7 @@
   .tab-page.active { display: flex; flex-direction: column; gap: 20px; }
   .tab-page.viewer-tab { padding: 0; background: #0d121b; position: relative; overflow: hidden; }
 
-  .page-head { display: flex; align-items: center; justify-content: space-between; }
+  .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .page-head h1 { margin: 0; font-size: 20px; font-weight: 700; }
   .page-head p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
 
@@ -100,7 +100,7 @@
   }
   .card-header {
     display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 18px;
+    margin-bottom: 18px; gap: 10px; flex-wrap: wrap;
   }
   .card-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 
@@ -138,7 +138,7 @@
     width: 100%; outline: none; padding: 2px 0;
   }
 
-  /* Connect Bar (ToDesk Signature) */
+  /* Connect Bar */
   .mode-switch {
     display: inline-flex; background: #f1f5f9; padding: 3px; border-radius: 9px; gap: 3px;
   }
@@ -171,7 +171,8 @@
   .btn:hover { filter: brightness(1.05); }
   .btn:active { transform: scale(0.98); }
   .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
-  .btn.sm { height: 34px; padding: 0 14px; font-size: 12.5px; border-radius: 8px; }
+  .btn.sm { height: 32px; padding: 0 12px; font-size: 12px; border-radius: 8px; }
+  .btn.xs { height: 26px; padding: 0 10px; font-size: 11.5px; border-radius: 6px; }
   .btn.ghost {
     background: #fff; color: var(--text); border: 1px solid var(--border); box-shadow: none;
   }
@@ -196,17 +197,25 @@
 
   /* Remote Viewer Cinema Stage */
   .viewer-bar {
-    height: 48px; padding: 0 16px; background: rgba(17, 24, 39, 0.92);
+    min-height: 48px; padding: 6px 14px; background: rgba(17, 24, 39, 0.94);
     border-bottom: 1px solid rgba(255,255,255,.08);
-    display: flex; align-items: center; gap: 10px; color: #e2e8f0;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: #e2e8f0;
   }
   .viewer-bar .pill-dark {
-    padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,.08);
-    font-family: Consolas, monospace; font-size: 11.5px; color: #93c5fd;
+    padding: 4px 9px; border-radius: 999px; background: rgba(255,255,255,.08);
+    font-family: Consolas, monospace; font-size: 11.5px; color: #93c5fd; white-space: nowrap;
+  }
+  .viewer-bar .pill-btn {
+    height: 28px; padding: 0 10px; border-radius: 7px; font-size: 11.5px; font-weight: 600;
+    border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.08);
+    color: #e2e8f0; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .viewer-bar .pill-btn.active {
+    background: rgba(16, 185, 129, 0.22); border-color: rgba(52, 211, 153, 0.55); color: #6ee7b7;
   }
   .viewer-bar input {
-    height: 30px; border-radius: 7px; border: 1px solid rgba(255,255,255,.15);
-    background: rgba(255,255,255,.07); color: #fff; padding: 0 10px; font-size: 12px; width: 210px; outline: none;
+    height: 28px; border-radius: 7px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.07); color: #fff; padding: 0 10px; font-size: 12px; width: 170px; outline: none;
   }
   .viewer-stage {
     flex: 1; display: flex; align-items: center; justify-content: center; padding: 14px; overflow: auto;
@@ -221,11 +230,37 @@
 
   /* File & Ops Layouts */
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  .file-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; margin-top: 10px; }
+  .file-list { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; margin-top: 12px; }
   .file-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 9px 12px; border-radius: 8px; background: #f8fafc; border: 1px solid var(--border); font-size: 13px;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 9px; background: #f8fafc; border: 1px solid var(--border); font-size: 13px;
   }
+  .file-row:hover { border-color: #cbd5e1; background: #f1f5f9; }
+  .file-name-btn {
+    border: none; background: transparent; padding: 0; font-size: 13px; color: var(--text);
+    cursor: pointer; text-align: left; font-weight: 500; word-break: break-all;
+  }
+  .file-name-btn.dir { color: var(--primary); font-weight: 600; }
+
+  .drop-zone {
+    border: 2px dashed #bfd7ff; border-radius: 12px; background: #f7faff;
+    padding: 24px 18px; text-align: center; cursor: pointer; transition: all .15s ease;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--primary); background: #ebf3ff;
+  }
+  .progress-box {
+    margin-top: 14px; padding: 12px 14px; border-radius: 10px;
+    background: #f8fafc; border: 1px solid var(--border); display: none;
+  }
+  .progress-track {
+    width: 100%; height: 8px; border-radius: 999px; background: #e2e8f0; overflow: hidden; margin-top: 8px;
+  }
+  .progress-fill {
+    height: 100%; width: 0%; background: linear-gradient(90deg, #1677ff, #10b981); transition: width .12s ease;
+  }
+
   .terminal {
     font-family: "SF Mono", Consolas, monospace; font-size: 12px; line-height: 1.5;
     background: #0f172a; color: #a7f3d0; border-radius: 10px; padding: 12px 14px;
@@ -297,12 +332,12 @@
 </nav>
 
 <main class="content">
-  <!-- TAB 1: HOME (Classic ToDesk Layout) -->
+  <!-- TAB 1: HOME -->
   <section id="tab-home" class="tab-page active">
     <div class="page-head">
       <div>
         <h1>远程控制</h1>
-        <p>支持零显卡自动降级 · 本机/局域网直连或中继设备码穿透</p>
+        <p>X25519+ChaCha20 端到端加密 · 局域网 P2P 直连竞速 · 设备号防抢注保护</p>
       </div>
       <span id="hostBadge" class="badge">被控未启动</span>
     </div>
@@ -313,6 +348,7 @@
         <div class="card-title">
           允许控制本设备
           <span class="badge blue" id="captureInfoBadge">待启动</span>
+          <span class="badge ok" id="ownerInfoBadge" style="display:none">🛡 防抢注已保护</span>
         </div>
         <div style="display:flex;gap:8px">
           <button id="btnStartHost" class="btn sm">启动被控服务</button>
@@ -332,7 +368,7 @@
 
         <div class="pwd-box">
           <div class="code-label">
-            <span>临时访问密码</span>
+            <span>临时访问密码（防爆破保护已启用）</span>
             <div style="display:flex;gap:5px">
               <button id="btnTogglePwd" class="icon-btn" title="显示/隐藏">👁</button>
               <button id="btnGenPwd" class="icon-btn" title="刷新随机密码">↻</button>
@@ -342,7 +378,7 @@
           <div class="pwd-row">
             <input id="hostToken" class="pwd-input" type="text" value="demo123" />
           </div>
-          <div style="font-size:11.5px;color:var(--muted)">控制端连接时需填写此密码，支持随时刷新</div>
+          <div style="font-size:11.5px;color:var(--muted)">端到端密钥派生绑定此密码，中继服务器无法解密</div>
         </div>
       </div>
     </div>
@@ -363,8 +399,8 @@
           <input id="connDirect" class="input" value="127.0.0.1:19800" placeholder="例如 192.168.1.100:19800" />
         </div>
         <div class="field" id="fieldRelay" style="display:none">
-          <label>伙伴设备代码 (通过中继服务器)</label>
-          <input id="connDevId" class="input" value="888100200" placeholder="请输入 9 位设备代码" />
+          <label>伙伴设备代码 (优先局域网直连，跨网自动中继)</label>
+          <input id="connDevId" class="input" value="888100200" placeholder="请输入设备代码" />
         </div>
         <div class="field">
           <label>临时访问密码</label>
@@ -374,7 +410,7 @@
       </div>
 
       <div id="relayQuickBar" style="display:none;margin-top:12px;align-items:center;justify-content:space-between;gap:10px">
-        <div style="font-size:12px;color:var(--text-2)">当前中继服务器：<strong id="relayAddrPreview">127.0.0.1:19901</strong></div>
+        <div style="font-size:12px;color:var(--text-2)">当前中继服务器：<strong id="relayAddrPreview">38.34.13.214:19901</strong></div>
         <button id="btnRefreshDevs" class="btn sm ghost">刷新在线设备</button>
       </div>
       <div id="devCards" class="dev-cards"></div>
@@ -385,24 +421,27 @@
   <section id="tab-viewer" class="tab-page viewer-tab">
     <div class="viewer-bar">
       <strong style="font-size:13px">远程桌面</strong>
+      <span id="e2eeBadge" class="pill-dark" style="display:none;color:#6ee7b7;background:rgba(16,185,129,.18)">🔒 E2EE</span>
       <span id="routeBadge" class="pill-dark" style="display:none;color:#86efac"></span>
       <span id="hud" class="pill-dark">未连接</span>
-      <select id="viewerQuality" style="height:30px;border-radius:7px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.15);padding:0 8px;font-size:12px">
+      <select id="viewerQuality" style="height:28px;border-radius:7px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.15);padding:0 8px;font-size:12px">
         <option value="960:60" style="color:#000">流畅 (960p)</option>
         <option value="1280:68" selected style="color:#000">均衡 (1280p)</option>
         <option value="1920:78" style="color:#000">高清 (1920p)</option>
         <option value="0:82" style="color:#000">原画 (无缩放)</option>
       </select>
-      <input id="typeInput" placeholder="输入文本回车发送到远端..." />
-      <button id="btnSendText" class="btn sm">发送文本</button>
-      <button id="btnSnap" class="btn sm ghost" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.15)">强制关键帧</button>
+      <button id="btnKeyMap" class="pill-btn" title="跨系统自动将 Ctrl+C/V/A/Z/S 映射为 macOS Command 键并自动同步系统剪贴板">⌘ Ctrl↔Cmd: 关</button>
+      <button id="btnQuickClipSync" class="pill-btn" title="读取远端系统剪贴板并写入本机剪贴板">📋 同步剪贴板</button>
+      <input id="typeInput" placeholder="输入文本回车发送..." />
+      <button id="btnSendText" class="btn sm">发送</button>
+      <button id="btnSnap" class="pill-btn">关键帧</button>
       <button id="btnDisconnect" class="btn sm danger" style="margin-left:auto">断开连接</button>
     </div>
-    <div class="viewer-stage">
+    <div class="viewer-stage" id="viewerStage">
       <div id="emptyStage" class="empty-stage">
         <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         <div style="font-size:15px;color:#cbd5e1;font-weight:600">尚未连接远程设备</div>
-        <div style="font-size:12.5px">请先在「远程控制」页启动本机被控（或输入对方地址）并点击「立即连接」</div>
+        <div style="font-size:12.5px">连接后支持增量瓦片流、E2EE 端到端加密、Ctrl↔Cmd 映射及拖拽文件直传</div>
         <button id="btnBackHome" class="btn sm">返回远程控制</button>
       </div>
       <canvas id="screen" tabindex="0" width="1280" height="720" style="display:none;outline:none"></canvas>
@@ -413,25 +452,66 @@
   <section id="tab-files" class="tab-page">
     <div class="page-head">
       <div>
-        <h1>安全文件传输（SHA-256 校验）</h1>
-        <p>读写受沙箱目录隔离保护，防止路径越权访问</p>
+        <h1>高速流式文件传输（256 KB 分块 + SHA-256 校验）</h1>
+        <p>支持任意大小二进制文件选择与拖拽上传，远端文件一键下载至本机 Downloads/CopyToDesk</p>
       </div>
+      <button id="btnOpenDownloads" class="btn sm ghost">📂 打开本机下载目录</button>
     </div>
+
     <div class="two-col">
+      <!-- Remote Directory Browser + One-Click Download -->
       <div class="card">
-        <div class="card-header"><div class="card-title">远端共享目录</div></div>
+        <div class="card-header">
+          <div class="card-title">远端共享目录</div>
+          <button id="btnDirUp" class="btn xs ghost">⬆ 上级目录</button>
+        </div>
         <div style="display:flex;gap:8px">
           <input id="dirPath" class="input" placeholder="相对目录（留空=根目录）" value="" />
-          <button id="btnListDir" class="btn sm" style="height:42px;flex-shrink:0">浏览</button>
+          <button id="btnListDir" class="btn sm" style="height:42px;flex-shrink:0">刷新目录</button>
         </div>
-        <div id="fileList" class="file-list"><div style="color:var(--muted);font-size:13px;padding:12px 0">连接远端后点击「浏览」查看文件</div></div>
+        <div id="fileList" class="file-list">
+          <div style="color:var(--muted);font-size:13px;padding:12px 0">连接远端后点击「刷新目录」查看并下载文件</div>
+        </div>
       </div>
 
+      <!-- Real File Picker + Drag-and-Drop + Chunked Progress -->
       <div class="card">
-        <div class="card-header"><div class="card-title">上传文件到远端</div></div>
-        <div class="field"><label>远端保存路径（相对路径）</label><input id="upName" class="input" value="notes/hello.txt" /></div>
-        <div class="field" style="margin-top:12px"><label>文件内容（文本）</label><textarea id="upContent" class="input" rows="5">Uploaded from CopyToDesk Desktop</textarea></div>
-        <button id="btnUpload" class="btn" style="margin-top:14px;width:100%">计算 SHA-256 并上传</button>
+        <div class="card-header">
+          <div class="card-title">上传本地文件到远端</div>
+          <span class="badge blue">E2EE 加密流</span>
+        </div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>远端目标子目录（留空则保存在当前浏览目录）</label>
+          <input id="upTargetDir" class="input" value="" placeholder="例如 docs 或留空" />
+        </div>
+
+        <input id="filePicker" type="file" multiple style="display:none" />
+        <div id="dropZone" class="drop-zone">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#1677ff" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <div style="font-size:14px;font-weight:600;color:var(--text)">点击选择本地文件，或将文件拖拽到此处</div>
+          <div style="font-size:12px;color:var(--muted)">支持多文件批量上传 · 256 KB 分块流式传输 · 自动校验 SHA-256</div>
+          <button id="btnPickFiles" type="button" class="btn sm" style="margin-top:4px">选择本地文件</button>
+        </div>
+
+        <div id="transferProgressBox" class="progress-box">
+          <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600">
+            <span id="transferTitle">准备传输...</span>
+            <span id="transferStat">0%</span>
+          </div>
+          <div class="progress-track">
+            <div id="transferBar" class="progress-fill"></div>
+          </div>
+        </div>
+
+        <details style="margin-top:16px">
+          <summary style="cursor:pointer;font-size:12.5px;color:var(--text-2);font-weight:500">快捷新建远端文本文件</summary>
+          <div style="margin-top:10px">
+            <div class="field"><label>远端保存路径</label><input id="upName" class="input" value="notes/hello.txt" /></div>
+            <div class="field" style="margin-top:8px"><label>文本内容</label><textarea id="upContent" class="input" rows="3">Uploaded from CopyToDesk v0.4.0</textarea></div>
+            <button id="btnUpload" class="btn sm" style="margin-top:10px;width:100%">保存文本到远端</button>
+          </div>
+        </details>
       </div>
     </div>
   </section>
@@ -440,17 +520,20 @@
   <section id="tab-ops" class="tab-page">
     <div class="page-head">
       <div>
-        <h1>双向剪贴板与白名单运维</h1>
-        <p>同步远程文本剪贴板，或在白名单护栏下执行只读运维命令</p>
+        <h1>原生系统剪贴板与白名单运维</h1>
+        <p>直接读写本机与远端操作系统剪贴板（Win32 / macOS pbcopy / Linux Wayland·X11）</p>
       </div>
     </div>
     <div class="two-col">
       <div class="card">
-        <div class="card-header"><div class="card-title">双向剪贴板</div></div>
-        <textarea id="clipBox" class="input" rows="6" placeholder="在此输入文本推送至远端，或点击拉取获取远端剪贴板..."></textarea>
+        <div class="card-header">
+          <div class="card-title">跨系统双向剪贴板</div>
+          <button id="btnReadLocalClip" class="btn xs ghost">读取本机剪贴板</button>
+        </div>
+        <textarea id="clipBox" class="input" rows="6" placeholder="点击「拉取远端剪贴板」获取对方复制的文本，或输入内容推送到对方系统剪贴板..."></textarea>
         <div style="display:flex;gap:10px;margin-top:14px">
-          <button id="btnClipGet" class="btn ghost" style="flex:1">拉取远端剪贴板</button>
-          <button id="btnClipSet" class="btn" style="flex:1">推送到远端</button>
+          <button id="btnClipGet" class="btn ghost" style="flex:1">⬇ 拉取远端并写入本机</button>
+          <button id="btnClipSet" class="btn" style="flex:1">⬆ 推送到远端系统剪贴板</button>
         </div>
       </div>
 
@@ -470,14 +553,17 @@
     <div class="page-head">
       <div>
         <h1>高级设置与运行日志</h1>
-        <p>配置监听端口、中继服务器地址与安全选项</p>
+        <p>配置监听端口、中继服务器地址、设备防抢注密钥与安全护栏</p>
       </div>
     </div>
     <div class="card">
-      <div class="card-header"><div class="card-title">网络与被控参数</div></div>
+      <div class="card-header">
+        <div class="card-title">网络与被控安全参数</div>
+        <button id="btnRotateSecret" class="btn xs ghost" title="仅在更换新设备代码且需重新生成本机归属证明时使用">重置防抢注密钥</button>
+      </div>
       <div class="two-col">
         <div class="field"><label>本机监听地址 (0.0.0.0 允许同局域网 P2P 自动直连)</label><input id="hostBind" class="input" value="0.0.0.0:19800" /></div>
-        <div class="field"><label>本机设备代码 (Device ID)</label><input id="hostDevId" class="input" value="888100200" /></div>
+        <div class="field"><label>本机设备代码 (首次注册后自动绑定本机防抢注密钥)</label><input id="hostDevId" class="input" value="888100200" /></div>
         <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="38.34.13.214:19901" placeholder="例如 38.34.13.214:19901" /></div>
         <div class="field" style="display:flex;flex-direction:column;justify-content:flex-end;gap:8px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">

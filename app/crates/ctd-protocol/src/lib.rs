@@ -1,14 +1,26 @@
-//! Wire-compatible Rust implementation of the CopyToDesk `CTD1` v1 binary protocol.
-//! Byte-for-byte compatible with the Windows C# MVP Host/Viewer, `signaling-relay.mjs`, and `mcp-server/index.mjs`.
+//! Wire-compatible Rust implementation of the CopyToDesk `CTD1` v1 binary protocol (v0.4.0 P1).
+//! Includes:
+//! - End-to-End Encryption (E2EE): Ephemeral `X25519` + `HKDF-SHA256` (bound to token) + `ChaCha20-Poly1305` AEAD
+//! - Chunked streaming file upload & download frames (`0x66..=0x69`) with per-chunk & whole-file SHA-256 verification
+//! - Backward-compatible framing with Windows C# MVP, `signaling-relay`, and `mcp-server`.
 
+use chacha20poly1305::{
+    aead::{Aead, KeyInit, Payload},
+    ChaCha20Poly1305, Nonce,
+};
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 pub const MAGIC: u32 = 0x3144_5443; // "CTD1" little-endian
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HEADER_SIZE: usize = 16;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const E2EE_HANDSHAKE_LEN: usize = 48; // 32B X25519 pubkey + 16B random salt
+pub const FILE_CHUNK_SIZE: usize = 256 * 1024; // 256 KB streaming chunk size
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -24,6 +36,8 @@ pub enum ProtocolError {
     Truncated(&'static str),
     #[error("relay handshake failed: {0}")]
     RelayHandshake(String),
+    #[error("e2ee crypto authentication failed (wrong password or tampered stream)")]
+    CryptoAuthFailed,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -37,6 +51,8 @@ pub enum MsgType {
     HelloAck = 0x02,
     Ping = 0x03,
     Pong = 0x04,
+    E2eeInit = 0x05,
+    E2eeAck = 0x06,
     VideoTileFrame = 0x10,
     RequestKeyFrame = 0x11,
     CursorState = 0x20,
@@ -52,6 +68,10 @@ pub enum MsgType {
     FileUploadResp = 0x63,
     FileDownloadReq = 0x64,
     FileDownloadResp = 0x65,
+    FileUploadChunk = 0x66,
+    FileUploadChunkAck = 0x67,
+    FileDownloadChunkReq = 0x68,
+    FileDownloadChunkResp = 0x69,
     ExecReq = 0x70,
     ExecResp = 0x71,
 }
@@ -64,6 +84,8 @@ impl TryFrom<u8> for MsgType {
             0x02 => Ok(Self::HelloAck),
             0x03 => Ok(Self::Ping),
             0x04 => Ok(Self::Pong),
+            0x05 => Ok(Self::E2eeInit),
+            0x06 => Ok(Self::E2eeAck),
             0x10 => Ok(Self::VideoTileFrame),
             0x11 => Ok(Self::RequestKeyFrame),
             0x20 => Ok(Self::CursorState),
@@ -79,6 +101,10 @@ impl TryFrom<u8> for MsgType {
             0x63 => Ok(Self::FileUploadResp),
             0x64 => Ok(Self::FileDownloadReq),
             0x65 => Ok(Self::FileDownloadResp),
+            0x66 => Ok(Self::FileUploadChunk),
+            0x67 => Ok(Self::FileUploadChunkAck),
+            0x68 => Ok(Self::FileDownloadChunkReq),
+            0x69 => Ok(Self::FileDownloadChunkResp),
             0x70 => Ok(Self::ExecReq),
             0x71 => Ok(Self::ExecResp),
             other => Err(ProtocolError::UnknownMsgType(other)),
@@ -102,6 +128,15 @@ pub mod frame_flags {
     pub const KEY_FRAME: u8 = 1 << 0;
     pub const LOSSLESS_REFINEMENT: u8 = 1 << 1;
     pub const COMPRESSED: u8 = 1 << 2;
+    pub const ENCRYPTED: u8 = 1 << 3;
+}
+
+pub mod key_mod_flags {
+    pub const EXTENDED: u16 = 1 << 0;
+    pub const SHIFT: u16 = 1 << 1;
+    pub const CTRL: u16 = 1 << 2;
+    pub const ALT: u16 = 1 << 3;
+    pub const META: u16 = 1 << 4;
 }
 
 #[repr(u8)]
@@ -159,7 +194,254 @@ impl FrameHeader {
             seq_id,
         })
     }
+
+    pub fn aad_bytes(&self) -> [u8; 8] {
+        let s = self.seq_id.to_le_bytes();
+        [
+            self.version,
+            self.msg_type as u8,
+            self.flags,
+            self.channel,
+            s[0],
+            s[1],
+            s[2],
+            s[3],
+        ]
+    }
 }
+
+// ============================================================================
+// End-to-End Encryption (X25519 + HKDF-SHA256 + ChaCha20-Poly1305)
+// ============================================================================
+
+pub struct SendCipher {
+    aead: ChaCha20Poly1305,
+    dir: u8,
+    counter: u64,
+}
+
+pub struct RecvCipher {
+    aead: ChaCha20Poly1305,
+    dir: u8,
+    counter: u64,
+}
+
+impl SendCipher {
+    pub fn seal(
+        &mut self,
+        msg_type: MsgType,
+        channel: ChannelId,
+        flags: u8,
+        seq_id: u32,
+        plaintext: &[u8],
+    ) -> Result<(u8, Vec<u8>), ProtocolError> {
+        let enc_flags = flags | frame_flags::ENCRYPTED;
+        let hdr = FrameHeader {
+            version: PROTOCOL_VERSION,
+            msg_type,
+            flags: enc_flags,
+            channel: channel as u8,
+            payload_len: 0,
+            seq_id,
+        };
+        let aad = hdr.aad_bytes();
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[0] = self.dir;
+        nonce_bytes[4..12].copy_from_slice(&self.counter.to_le_bytes());
+        self.counter = self.counter.wrapping_add(1);
+
+        let ct = self
+            .aead
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| ProtocolError::CryptoAuthFailed)?;
+        Ok((enc_flags, ct))
+    }
+}
+
+impl RecvCipher {
+    pub fn open(&mut self, hdr: &FrameHeader, ciphertext: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        if (hdr.flags & frame_flags::ENCRYPTED) == 0 {
+            return Err(ProtocolError::CryptoAuthFailed);
+        }
+        let aad = hdr.aad_bytes();
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[0] = self.dir;
+        nonce_bytes[4..12].copy_from_slice(&self.counter.to_le_bytes());
+        self.counter = self.counter.wrapping_add(1);
+
+        self.aead
+            .decrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| ProtocolError::CryptoAuthFailed)
+    }
+}
+
+fn derive_directional_ciphers(
+    shared_secret: &[u8; 32],
+    client_pub: &[u8; 32],
+    host_pub: &[u8; 32],
+    client_salt: &[u8; 16],
+    host_salt: &[u8; 16],
+    token: &str,
+    is_client: bool,
+) -> (SendCipher, RecvCipher) {
+    let token_hash = Sha256::digest(token.as_bytes());
+    let mut ikm = [0u8; 64];
+    ikm[0..32].copy_from_slice(shared_secret);
+    ikm[32..64].copy_from_slice(&token_hash);
+
+    let mut salt_hasher = Sha256::new();
+    salt_hasher.update(b"CTD1-E2EE-SALT-v1");
+    salt_hasher.update(client_pub);
+    salt_hasher.update(host_pub);
+    salt_hasher.update(client_salt);
+    salt_hasher.update(host_salt);
+    let salt = salt_hasher.finalize();
+
+    let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
+    let mut c2h_key = [0u8; 32];
+    let mut h2c_key = [0u8; 32];
+    hk.expand(b"CTD1-E2EE-C2H-KEY", &mut c2h_key)
+        .expect("valid HKDF output len");
+    hk.expand(b"CTD1-E2EE-H2C-KEY", &mut h2c_key)
+        .expect("valid HKDF output len");
+
+    let c2h_aead = ChaCha20Poly1305::new_from_slice(&c2h_key).expect("32-byte key");
+    let h2c_aead = ChaCha20Poly1305::new_from_slice(&h2c_key).expect("32-byte key");
+
+    if is_client {
+        (
+            SendCipher {
+                aead: c2h_aead,
+                dir: 1,
+                counter: 0,
+            },
+            RecvCipher {
+                aead: h2c_aead,
+                dir: 2,
+                counter: 0,
+            },
+        )
+    } else {
+        (
+            SendCipher {
+                aead: h2c_aead,
+                dir: 2,
+                counter: 0,
+            },
+            RecvCipher {
+                aead: c2h_aead,
+                dir: 1,
+                counter: 0,
+            },
+        )
+    }
+}
+
+pub struct E2eeClientHandshake {
+    secret: StaticSecret,
+    client_pub: [u8; 32],
+    client_salt: [u8; 16],
+}
+
+impl E2eeClientHandshake {
+    pub fn new() -> (Self, [u8; E2EE_HANDSHAKE_LEN]) {
+        let sec_bytes: [u8; 32] = rand::random();
+        let client_salt: [u8; 16] = rand::random();
+        let secret = StaticSecret::from(sec_bytes);
+        let pub_key = PublicKey::from(&secret);
+        let client_pub = *pub_key.as_bytes();
+
+        let mut init_payload = [0u8; E2EE_HANDSHAKE_LEN];
+        init_payload[0..32].copy_from_slice(&client_pub);
+        init_payload[32..48].copy_from_slice(&client_salt);
+        (
+            Self {
+                secret,
+                client_pub,
+                client_salt,
+            },
+            init_payload,
+        )
+    }
+
+    pub fn finish(
+        self,
+        ack_payload: &[u8],
+        token: &str,
+    ) -> Result<(SendCipher, RecvCipher), ProtocolError> {
+        if ack_payload.len() < E2EE_HANDSHAKE_LEN {
+            return Err(ProtocolError::Truncated("E2eeAck"));
+        }
+        let mut host_pub = [0u8; 32];
+        let mut host_salt = [0u8; 16];
+        host_pub.copy_from_slice(&ack_payload[0..32]);
+        host_salt.copy_from_slice(&ack_payload[32..48]);
+
+        let peer = PublicKey::from(host_pub);
+        let shared = self.secret.diffie_hellman(&peer);
+        Ok(derive_directional_ciphers(
+            shared.as_bytes(),
+            &self.client_pub,
+            &host_pub,
+            &self.client_salt,
+            &host_salt,
+            token,
+            true,
+        ))
+    }
+}
+
+pub fn accept_e2ee_server(
+    init_payload: &[u8],
+    token: &str,
+) -> Result<([u8; E2EE_HANDSHAKE_LEN], SendCipher, RecvCipher), ProtocolError> {
+    if init_payload.len() < E2EE_HANDSHAKE_LEN {
+        return Err(ProtocolError::Truncated("E2eeInit"));
+    }
+    let mut client_pub = [0u8; 32];
+    let mut client_salt = [0u8; 16];
+    client_pub.copy_from_slice(&init_payload[0..32]);
+    client_salt.copy_from_slice(&init_payload[32..48]);
+
+    let sec_bytes: [u8; 32] = rand::random();
+    let host_salt: [u8; 16] = rand::random();
+    let secret = StaticSecret::from(sec_bytes);
+    let host_pub = *PublicKey::from(&secret).as_bytes();
+
+    let peer = PublicKey::from(client_pub);
+    let shared = secret.diffie_hellman(&peer);
+
+    let mut ack_payload = [0u8; E2EE_HANDSHAKE_LEN];
+    ack_payload[0..32].copy_from_slice(&host_pub);
+    ack_payload[32..48].copy_from_slice(&host_salt);
+
+    let (send_c, recv_c) = derive_directional_ciphers(
+        shared.as_bytes(),
+        &client_pub,
+        &host_pub,
+        &client_salt,
+        &host_salt,
+        token,
+        false,
+    );
+    Ok((ack_payload, send_c, recv_c))
+}
+
+// ============================================================================
+// Video, Input, Control & Chunked File Payloads
+// ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct EncodedTile {
@@ -352,6 +634,26 @@ pub struct HelloAckPayload {
     pub codec_probe: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadChunkMeta {
+    pub upload_id: String,
+    pub path: String,
+    pub offset: u64,
+    pub total_size: u64,
+    pub eof: bool,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadChunkReq {
+    pub path: String,
+    pub offset: u64,
+    pub max_bytes: u32,
+}
+
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     msg_type: MsgType,
@@ -375,6 +677,23 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+pub async fn write_frame_opt_cipher<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    cipher: Option<&mut SendCipher>,
+    msg_type: MsgType,
+    channel: ChannelId,
+    flags: u8,
+    seq_id: u32,
+    payload: &[u8],
+) -> Result<(), ProtocolError> {
+    if let Some(c) = cipher {
+        let (enc_flags, ct) = c.seal(msg_type, channel, flags, seq_id, payload)?;
+        write_frame(writer, msg_type, channel, enc_flags, seq_id, &ct).await
+    } else {
+        write_frame(writer, msg_type, channel, flags, seq_id, payload).await
+    }
+}
+
 pub async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(FrameHeader, Vec<u8>), ProtocolError> {
@@ -386,6 +705,19 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
         reader.read_exact(&mut payload).await?;
     }
     Ok((hdr, payload))
+}
+
+pub async fn read_frame_opt_cipher<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cipher: Option<&mut RecvCipher>,
+) -> Result<(FrameHeader, Vec<u8>), ProtocolError> {
+    let (hdr, raw) = read_frame(reader).await?;
+    if let Some(c) = cipher {
+        let pt = c.open(&hdr, &raw)?;
+        Ok((hdr, pt))
+    } else {
+        Ok((hdr, raw))
+    }
 }
 
 /// Performs the line-based `CONNECT <deviceId>\n` -> `OK TUNNEL\n` handshake against `signaling-relay`.
@@ -476,5 +808,65 @@ mod tests {
         assert_eq!(pkt2.frame_id, 7);
         assert_eq!(pkt2.tiles.len(), 1);
         assert_eq!(pkt2.tiles[0].data, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn e2ee_x25519_chacha20poly1305_handshake_and_tamper_rejection() {
+        let (client_hs, init_bytes) = E2eeClientHandshake::new();
+        let (ack_bytes, mut host_tx, mut host_rx) =
+            accept_e2ee_server(&init_bytes, "secret-pass-999").unwrap();
+        let (mut client_tx, mut client_rx) =
+            client_hs.finish(&ack_bytes, "secret-pass-999").unwrap();
+
+        // Client -> Host encrypted frame
+        let msg = b"hello encrypted remote desktop";
+        let (flags, ct) = client_tx
+            .seal(MsgType::Hello, ChannelId::Control, 0, 1, msg)
+            .unwrap();
+        assert_ne!(flags & frame_flags::ENCRYPTED, 0);
+        assert_eq!(ct.len(), msg.len() + 16);
+
+        let hdr = FrameHeader {
+            version: PROTOCOL_VERSION,
+            msg_type: MsgType::Hello,
+            flags,
+            channel: ChannelId::Control as u8,
+            payload_len: ct.len() as u32,
+            seq_id: 1,
+        };
+        let pt = host_rx.open(&hdr, &ct).unwrap();
+        assert_eq!(pt, msg);
+
+        // Host -> Client encrypted frame + AAD header tamper test
+        let (h_flags, h_ct) = host_tx
+            .seal(MsgType::VideoTileFrame, ChannelId::Video, frame_flags::KEY_FRAME, 2, b"tile-bytes")
+            .unwrap();
+        let mut bad_hdr = FrameHeader {
+            version: PROTOCOL_VERSION,
+            msg_type: MsgType::VideoTileFrame,
+            flags: h_flags,
+            channel: ChannelId::Video as u8,
+            payload_len: h_ct.len() as u32,
+            seq_id: 99, // tampered seq_id!
+        };
+        // Note: failed open advances rx counter, so test wrong token separately too
+        let (client_hs2, init2) = E2eeClientHandshake::new();
+        let (ack2, _, mut host_rx_wrong) = accept_e2ee_server(&init2, "wrong-token").unwrap();
+        let (mut client_tx2, _) = client_hs2.finish(&ack2, "right-token").unwrap();
+        let (f2, ct2) = client_tx2
+            .seal(MsgType::Hello, ChannelId::Control, 0, 1, b"auth")
+            .unwrap();
+        let hdr2 = FrameHeader {
+            version: PROTOCOL_VERSION,
+            msg_type: MsgType::Hello,
+            flags: f2,
+            channel: 0,
+            payload_len: ct2.len() as u32,
+            seq_id: 1,
+        };
+        assert!(host_rx_wrong.open(&hdr2, &ct2).is_err());
+
+        assert!(client_rx.open(&bad_hdr, &h_ct).is_err());
+        bad_hdr.seq_id = 2;
     }
 }

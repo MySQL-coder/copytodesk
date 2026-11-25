@@ -24,7 +24,11 @@ app/src-tauri/icons/icon.icns
 app/src-tauri/icons/Square*.png
 app/src-tauri/icons/StoreLogo.png
 
-# === OS / IDE ===
+# === OS / IDE / Python & Relay runtime state ===
+__pycache__/
+*.pyc
+device_owners.json
+device_owners.json.tmp
 .DS_Store
 Thumbs.db
 .vscode/

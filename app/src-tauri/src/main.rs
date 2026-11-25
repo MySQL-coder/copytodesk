@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine;
-use ctd_core::client::{ConnectInfo, ConnectParams, ScreenshotResult};
-use ctd_core::{HostConfig, HostHandle, HostStatus, RemoteClient};
+use ctd_core::client::{ConnectInfo, ConnectParams, DownloadResult, ScreenshotResult};
+use ctd_core::{clipboard, HostConfig, HostHandle, HostStatus, RemoteClient};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, RwLock};
@@ -13,13 +15,38 @@ struct AppState {
     client: Arc<RwLock<Option<Arc<RemoteClient>>>>,
 }
 
+fn default_downloads_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let d = PathBuf::from(profile).join("Downloads").join("CopyToDesk");
+            if std::fs::create_dir_all(&d).is_ok() {
+                return d;
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let d = PathBuf::from(home).join("Downloads").join("CopyToDesk");
+            if std::fs::create_dir_all(&d).is_ok() {
+                return d;
+            }
+        }
+    }
+    let fallback = std::env::temp_dir().join("CopyToDesk").join("Downloads");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
+}
+
 #[tauri::command]
 fn get_platform_info() -> serde_json::Value {
     serde_json::json!({
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "mode": "tauri-native",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": env!("CARGO_PKG_VERSION"),
+        "downloadsDir": default_downloads_dir().to_string_lossy()
     })
 }
 
@@ -113,7 +140,12 @@ async fn remote_screenshot(
 }
 
 #[tauri::command]
-async fn remote_click(state: State<'_, AppState>, x: u32, y: u32, button: u8) -> Result<(), String> {
+async fn remote_click(
+    state: State<'_, AppState>,
+    x: u32,
+    y: u32,
+    button: u8,
+) -> Result<(), String> {
     let guard = state.client.read().await;
     let c = guard.as_ref().ok_or_else(|| "Not connected".to_string())?;
     c.click(x, y, button)
@@ -138,11 +170,12 @@ async fn remote_key_event(
     state: State<'_, AppState>,
     action: u8,
     vk: u16,
+    flags: Option<u16>,
     unicode_char: u32,
 ) -> Result<(), String> {
     let guard = state.client.read().await;
     let c = guard.as_ref().ok_or_else(|| "Not connected".to_string())?;
-    c.key_event(action, vk, unicode_char)
+    c.key_event_ext(action, vk, flags.unwrap_or(0), unicode_char)
 }
 
 #[tauri::command]
@@ -150,6 +183,22 @@ async fn remote_type(state: State<'_, AppState>, text: String) -> Result<(), Str
     let guard = state.client.read().await;
     let c = guard.as_ref().ok_or_else(|| "Not connected".to_string())?;
     c.type_text(&text)
+}
+
+#[tauri::command]
+async fn local_clipboard_get() -> Result<String, String> {
+    tokio::task::spawn_blocking(clipboard::get_text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn local_clipboard_set(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let _ = clipboard::set_text(&text);
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -175,7 +224,10 @@ async fn remote_clipboard_set(state: State<'_, AppState>, text: String) -> Resul
 }
 
 #[tauri::command]
-async fn remote_list_dir(state: State<'_, AppState>, remote_path: String) -> Result<String, String> {
+async fn remote_list_dir(
+    state: State<'_, AppState>,
+    remote_path: String,
+) -> Result<String, String> {
     let c = state
         .client
         .read()
@@ -204,7 +256,85 @@ async fn remote_upload_base64(
 }
 
 #[tauri::command]
-async fn remote_exec_guarded(state: State<'_, AppState>, command: String) -> Result<String, String> {
+async fn remote_upload_chunk(
+    state: State<'_, AppState>,
+    upload_id: String,
+    remote_path: String,
+    offset: u64,
+    total_size: u64,
+    eof: bool,
+    chunk_base64: String,
+) -> Result<String, String> {
+    let chunk = if chunk_base64.is_empty() {
+        Vec::new()
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(chunk_base64.trim())
+            .map_err(|e| e.to_string())?
+    };
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+    c.upload_chunk(&upload_id, &remote_path, offset, total_size, eof, &chunk)
+        .await
+}
+
+#[tauri::command]
+async fn remote_download_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    remote_path: String,
+) -> Result<DownloadResult, String> {
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+
+    let safe_name = Path::new(&remote_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && s != "." && s != "..")
+        .ok_or_else(|| "Invalid remote file name".to_string())?;
+
+    let dest = default_downloads_dir().join(&safe_name);
+    let name_for_ev = safe_name.clone();
+    c.download_file_to_path(&remote_path, &dest, move |transferred, total| {
+        let _ = app.emit(
+            "file-transfer-progress",
+            serde_json::json!({
+                "direction": "download",
+                "name": name_for_ev,
+                "transferred": transferred,
+                "total": total,
+            }),
+        );
+    })
+    .await
+}
+
+#[tauri::command]
+fn open_downloads_dir() -> Result<String, String> {
+    let dir = default_downloads_dir();
+    #[cfg(target_os = "windows")]
+    let res = Command::new("explorer").arg(&dir).spawn();
+    #[cfg(target_os = "macos")]
+    let res = Command::new("open").arg(&dir).spawn();
+    #[cfg(target_os = "linux")]
+    let res = Command::new("xdg-open").arg(&dir).spawn();
+    res.map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn remote_exec_guarded(
+    state: State<'_, AppState>,
+    command: String,
+) -> Result<String, String> {
     let c = state
         .client
         .read()
@@ -233,10 +363,15 @@ fn main() {
             remote_mouse_norm,
             remote_key_event,
             remote_type,
+            local_clipboard_get,
+            local_clipboard_set,
             remote_clipboard_get,
             remote_clipboard_set,
             remote_list_dir,
             remote_upload_base64,
+            remote_upload_chunk,
+            remote_download_file,
+            open_downloads_dir,
             remote_exec_guarded
         ])
         .run(tauri::generate_context!())
