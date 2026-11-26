@@ -1,5 +1,8 @@
 name: Build Multi-Platform App Bundles
 
+permissions:
+  contents: write
+
 on:
   push:
     branches:
@@ -77,3 +80,25 @@ jobs:
             app/target/**/release/bundle/appimage/*.AppImage
             app/target/**/release/bundle/deb/*.deb
           if-no-files-found: warn
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-bundles
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download All Multi-Platform Bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: release-bundles
+
+      - name: Create GitHub Release with Direct Installer Links
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-bundles/**/*.exe
+            release-bundles/**/*.msi
+            release-bundles/**/*.dmg
+            release-bundles/**/*.AppImage
+            release-bundles/**/*.deb

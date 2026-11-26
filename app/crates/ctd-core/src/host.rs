@@ -12,8 +12,8 @@ use crate::cursor;
 use crate::input::{create_injector, InputInjector};
 use ctd_protocol::{
     read_frame, read_frame_opt_cipher, write_frame, write_frame_opt_cipher, ChannelId,
-    CursorStatePacket, DownloadChunkReq, HelloAckPayload, HelloPayload, KeyEventPacket,
-    MonitorInfo, MonitorSelectAckPayload, MouseEventPacket, MsgType, SendCipher,
+    CursorStatePacket, DownloadChunkReq, FileActionPayload, HelloAckPayload, HelloPayload,
+    KeyEventPacket, MonitorInfo, MonitorSelectAckPayload, MouseEventPacket, MsgType, SendCipher,
     ServerE2eeHandshake, UploadChunkMeta, FILE_CHUNK_SIZE,
 };
 use serde::{Deserialize, Serialize};
@@ -186,6 +186,7 @@ struct SharedState {
     capture_backend: String,
     latest_rgba: RwLock<Vec<u8>>,
     clipboard: RwLock<String>,
+    clipboard_png: RwLock<Vec<u8>>,
     injector: Arc<dyn InputInjector>,
     frame_tx: broadcast::Sender<(u8, Vec<u8>)>,
     cursor_tx: broadcast::Sender<[u8; 6]>,
@@ -285,6 +286,7 @@ impl HostHandle {
             capture_backend,
             latest_rgba: RwLock::new(vec![0u8; (init_w * init_h * 4) as usize]),
             clipboard: RwLock::new(String::new()),
+            clipboard_png: RwLock::new(Vec::new()),
             injector,
             frame_tx,
             cursor_tx,
@@ -893,6 +895,35 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                 )
                 .await;
             }
+            MsgType::ClipboardImageGet => {
+                let fallback = state.clipboard_png.read().await.clone();
+                let os_png = tokio::task::spawn_blocking(clipboard::get_image_png)
+                    .await
+                    .unwrap_or_default();
+                let png = if os_png.is_empty() { fallback } else { os_png };
+                let _ = send_locked(
+                    &wr,
+                    MsgType::ClipboardImageData,
+                    ChannelId::Control,
+                    0,
+                    &png,
+                )
+                .await;
+            }
+            MsgType::ClipboardImageData => {
+                let len_bytes = (payload.len() as u32).to_le_bytes();
+                *state.clipboard_png.write().await = payload.clone();
+                let png_os = payload;
+                let _ = tokio::task::spawn_blocking(move || clipboard::set_image_png(&png_os)).await;
+                let _ = send_locked(
+                    &wr,
+                    MsgType::ClipboardImageData,
+                    ChannelId::Control,
+                    0,
+                    &len_bytes,
+                )
+                .await;
+            }
             MsgType::FileListReq => {
                 let rel = String::from_utf8_lossy(&payload);
                 let resp = handle_file_list(&state.cfg.file_root, &rel);
@@ -947,6 +978,23 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
                     ChannelId::File,
                     0,
                     &resp,
+                )
+                .await;
+            }
+            MsgType::FileActionReq => {
+                let root = state.cfg.file_root.clone();
+                let resp =
+                    tokio::task::spawn_blocking(move || handle_file_action(&root, &payload))
+                        .await
+                        .unwrap_or_else(|e| {
+                            serde_json::json!({ "ok": false, "error": e.to_string() }).to_string()
+                        });
+                let _ = send_locked(
+                    &wr,
+                    MsgType::FileActionResp,
+                    ChannelId::File,
+                    0,
+                    resp.as_bytes(),
                 )
                 .await;
             }
@@ -1252,6 +1300,71 @@ fn handle_file_download_chunk(root: &Path, payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&digest);
     out.extend_from_slice(&chunk);
     out
+}
+
+fn handle_file_action(root: &Path, payload: &[u8]) -> String {
+    let Ok(act) = serde_json::from_slice::<FileActionPayload>(payload) else {
+        return serde_json::json!({ "ok": false, "error": "Invalid file action JSON" }).to_string();
+    };
+    let clean_rel = act.path.trim().trim_matches(['/', '\\']);
+    if clean_rel.is_empty() || clean_rel == "." {
+        return serde_json::json!({ "ok": false, "error": "Target relative path cannot be empty" })
+            .to_string();
+    }
+    let target = match resolve_sandboxed(root, clean_rel) {
+        Ok(t) => t,
+        Err(e) => return serde_json::json!({ "ok": false, "error": e }).to_string(),
+    };
+    if target == root {
+        return serde_json::json!({ "ok": false, "error": "Cannot modify sandbox root directory" })
+            .to_string();
+    }
+
+    match act.action.as_str() {
+        "mkdir" => match std::fs::create_dir_all(&target) {
+            Ok(_) => serde_json::json!({ "ok": true, "action": "mkdir", "path": clean_rel }).to_string(),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+        },
+        "delete" => {
+            if !target.exists() {
+                return serde_json::json!({ "ok": false, "error": "Target does not exist" }).to_string();
+            }
+            let res = if target.is_dir() {
+                std::fs::remove_dir_all(&target)
+            } else {
+                std::fs::remove_file(&target)
+            };
+            match res {
+                Ok(_) => serde_json::json!({ "ok": true, "action": "delete", "path": clean_rel }).to_string(),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+            }
+        }
+        "rename" => {
+            let new_name = act.new_name.unwrap_or_default().trim().to_string();
+            let mut comps = Path::new(&new_name).components();
+            let valid_single = matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none();
+            if !valid_single {
+                return serde_json::json!({ "ok": false, "error": "Invalid new file/folder name" }).to_string();
+            }
+            let Some(parent) = target.parent() else {
+                return serde_json::json!({ "ok": false, "error": "Invalid parent directory" }).to_string();
+            };
+            let dest = parent.join(&new_name);
+            if dest.exists() {
+                return serde_json::json!({ "ok": false, "error": "Target name already exists" }).to_string();
+            }
+            match std::fs::rename(&target, &dest) {
+                Ok(_) => serde_json::json!({ "ok": true, "action": "rename", "newName": new_name }).to_string(),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+            }
+        }
+        "cancelUpload" => {
+            let part_path = PathBuf::from(format!("{}.ctdpart", target.to_string_lossy()));
+            let _ = std::fs::remove_file(&part_path);
+            serde_json::json!({ "ok": true, "action": "cancelUpload" }).to_string()
+        }
+        other => serde_json::json!({ "ok": false, "error": format!("Unknown file action: {other}") }).to_string(),
+    }
 }
 
 async fn handle_guarded_exec(cfg: &HostConfig, json_str: &str) -> String {

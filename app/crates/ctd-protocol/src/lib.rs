@@ -64,6 +64,8 @@ pub enum MsgType {
     ScreenshotResp = 0x41,
     ClipboardGet = 0x50,
     ClipboardData = 0x51,
+    ClipboardImageGet = 0x52,
+    ClipboardImageData = 0x53,
     FileListReq = 0x60,
     FileListResp = 0x61,
     FileUploadReq = 0x62,
@@ -74,6 +76,8 @@ pub enum MsgType {
     FileUploadChunkAck = 0x67,
     FileDownloadChunkReq = 0x68,
     FileDownloadChunkResp = 0x69,
+    FileActionReq = 0x6A,
+    FileActionResp = 0x6B,
     ExecReq = 0x70,
     ExecResp = 0x71,
 }
@@ -99,6 +103,8 @@ impl TryFrom<u8> for MsgType {
             0x41 => Ok(Self::ScreenshotResp),
             0x50 => Ok(Self::ClipboardGet),
             0x51 => Ok(Self::ClipboardData),
+            0x52 => Ok(Self::ClipboardImageGet),
+            0x53 => Ok(Self::ClipboardImageData),
             0x60 => Ok(Self::FileListReq),
             0x61 => Ok(Self::FileListResp),
             0x62 => Ok(Self::FileUploadReq),
@@ -109,6 +115,8 @@ impl TryFrom<u8> for MsgType {
             0x67 => Ok(Self::FileUploadChunkAck),
             0x68 => Ok(Self::FileDownloadChunkReq),
             0x69 => Ok(Self::FileDownloadChunkResp),
+            0x6A => Ok(Self::FileActionReq),
+            0x6B => Ok(Self::FileActionResp),
             0x70 => Ok(Self::ExecReq),
             0x71 => Ok(Self::ExecResp),
             other => Err(ProtocolError::UnknownMsgType(other)),
@@ -756,6 +764,15 @@ pub struct DownloadChunkReq {
     pub path: String,
     pub offset: u64,
     pub max_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileActionPayload {
+    pub action: String, // "mkdir" | "delete" | "rename" | "cancelUpload"
+    pub path: String,
+    #[serde(default)]
+    pub new_name: Option<String>,
 }
 
 pub async fn write_frame<W: AsyncWrite + Unpin>(

@@ -8,9 +8,9 @@ use base64::Engine;
 use ctd_protocol::{
     connect_via_relay, frame_flags, lookup_lan_via_relay, read_frame, read_frame_opt_cipher,
     write_frame, write_frame_opt_cipher, ChannelId, CursorStatePacket, DownloadChunkReq,
-    E2eeClientHandshake, HelloAckPayload, HelloPayload, KeyEventPacket, MonitorSelectAckPayload,
-    MouseEventPacket, MsgType, RecvCipher, SendCipher, TileEncoding, UploadChunkMeta,
-    VideoTileFramePacket, FILE_CHUNK_SIZE,
+    E2eeClientHandshake, FileActionPayload, HelloAckPayload, HelloPayload, KeyEventPacket,
+    MonitorSelectAckPayload, MouseEventPacket, MsgType, RecvCipher, SendCipher, TileEncoding,
+    UploadChunkMeta, VideoTileFramePacket, FILE_CHUNK_SIZE,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -107,6 +107,7 @@ pub struct RemoteClient {
     upload_hashers: Mutex<HashMap<String, Sha256>>,
     remote_w: AtomicU16,
     remote_h: AtomicU16,
+    download_cancel: Arc<AtomicBool>,
     manual_disconnect: Arc<AtomicBool>,
     cancel: Arc<Notify>,
     pub info: ConnectInfo,
@@ -373,6 +374,7 @@ impl RemoteClient {
             upload_hashers: Mutex::new(HashMap::new()),
             remote_w: AtomicU16::new(init_w),
             remote_h: AtomicU16::new(init_h),
+            download_cancel: Arc::new(AtomicBool::new(false)),
             manual_disconnect,
             cancel,
             info,
@@ -381,6 +383,10 @@ impl RemoteClient {
         let q = params.initial_quality.unwrap_or(68);
         let _ = client.set_stream_quality(mw, q);
         Ok(client)
+    }
+
+    pub fn cancel_transfer(&self) {
+        self.download_cancel.store(true, Ordering::Release);
     }
 
     pub fn disconnect(&self) {
@@ -580,6 +586,66 @@ impl RemoteClient {
         Ok(())
     }
 
+    pub async fn clipboard_get_image_base64(&self) -> Result<String, String> {
+        let resp = self
+            .request_rpc(
+                MsgType::ClipboardImageGet,
+                MsgType::ClipboardImageData,
+                ChannelId::Control,
+                Vec::new(),
+                12_000,
+            )
+            .await?;
+        if resp.len() < 8 || &resp[0..8] != b"\x89PNG\r\n\x1a\n" {
+            return Ok(String::new());
+        }
+        Ok(base64::engine::general_purpose::STANDARD.encode(&resp))
+    }
+
+    pub async fn clipboard_set_image_bytes(&self, png_bytes: Vec<u8>) -> Result<u32, String> {
+        if png_bytes.len() < 8 || &png_bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+            return Err("Invalid PNG image bytes".into());
+        }
+        let resp = self
+            .request_rpc(
+                MsgType::ClipboardImageData,
+                MsgType::ClipboardImageData,
+                ChannelId::Control,
+                png_bytes,
+                15_000,
+            )
+            .await?;
+        if resp.len() >= 4 {
+            Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub async fn file_action(
+        &self,
+        action: &str,
+        remote_path: &str,
+        new_name: Option<String>,
+    ) -> Result<String, String> {
+        let req = FileActionPayload {
+            action: action.to_string(),
+            path: remote_path.to_string(),
+            new_name,
+        };
+        let payload = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+        let resp = self
+            .request_rpc(
+                MsgType::FileActionReq,
+                MsgType::FileActionResp,
+                ChannelId::File,
+                payload,
+                8_000,
+            )
+            .await?;
+        Ok(String::from_utf8_lossy(&resp).to_string())
+    }
+
     pub async fn list_dir(&self, rel: &str) -> Result<String, String> {
         let resp = self
             .request_rpc(
@@ -693,12 +759,18 @@ impl RemoteClient {
         if let Some(parent) = local_dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        self.download_cancel.store(false, Ordering::Release);
         let part_path = PathBuf::from(format!("{}.ctdpart", local_dest.to_string_lossy()));
         let mut out_file = std::fs::File::create(&part_path).map_err(|e| e.to_string())?;
         let mut full_hasher = Sha256::new();
         let mut offset = 0u64;
 
         loop {
+            if self.download_cancel.load(Ordering::Acquire) {
+                drop(out_file);
+                let _ = std::fs::remove_file(&part_path);
+                return Err("传输已取消".into());
+            }
             let req = DownloadChunkReq {
                 path: remote_path.to_string(),
                 offset,
@@ -889,7 +961,29 @@ mod tests {
         assert_eq!(dl_res.sha256, expected_sha);
         assert_eq!(std::fs::read(&dl_target).unwrap(), big_data);
 
-        // 5. Kicking viewers from Host triggers remote disconnect callback immediately
+        // 5. Sandbox file actions (mkdir + rename + delete) & PNG image clipboard sync
+        let mk = client.file_action("mkdir", "docs_v070", None).await.unwrap();
+        assert!(mk.contains("\"ok\":true"));
+        let rn = client
+            .file_action("rename", "sub/big_binary.bin", Some("renamed.bin".into()))
+            .await
+            .unwrap();
+        assert!(rn.contains("\"ok\":true"));
+        let rm = client
+            .file_action("delete", "sub/renamed.bin", None)
+            .await
+            .unwrap();
+        assert!(rm.contains("\"ok\":true"));
+
+        let (_, _, mini_png) =
+            crate::codec::encode_full_screenshot(&vec![200u8; 4 * 4 * 4], 4, 4, 0, 80, true)
+                .unwrap();
+        let ack_len = client.clipboard_set_image_bytes(mini_png.clone()).await.unwrap();
+        assert_eq!(ack_len, mini_png.len() as u32);
+        let got_b64 = client.clipboard_get_image_base64().await.unwrap();
+        assert!(!got_b64.is_empty());
+
+        // 6. Kicking viewers from Host triggers remote disconnect callback immediately
         host.kick_viewers();
         for _ in 0..20 {
             if disc_fired.load(Ordering::Acquire) {

@@ -581,6 +581,10 @@
           <input id="dirPath" class="input" placeholder="相对目录（留空=根目录）" value="" />
           <button id="btnListDir" class="btn sm" style="height:42px;flex-shrink:0">刷新目录</button>
         </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <input id="newFolderName" class="input" style="height:34px;font-size:12.5px" placeholder="输入新文件夹名称..." value="" />
+          <button id="btnMkdir" type="button" class="btn xs ghost" style="height:34px;flex-shrink:0">➕ 新建文件夹</button>
+        </div>
         <div id="fileList" class="file-list">
           <div style="color:var(--muted);font-size:13px;padding:12px 0">连接远端后点击「刷新目录」查看并下载文件</div>
         </div>
@@ -606,9 +610,12 @@
         </div>
 
         <div id="transferProgressBox" class="progress-box">
-          <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;font-weight:600">
             <span id="transferTitle">准备传输...</span>
-            <span id="transferStat">0%</span>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span id="transferStat">0%</span>
+              <button id="btnCancelTransfer" type="button" class="btn xs danger" style="display:none">✕ 取消</button>
+            </div>
           </div>
           <div class="progress-track">
             <div id="transferBar" class="progress-fill"></div>
@@ -638,13 +645,21 @@
     <div class="two-col">
       <div class="card">
         <div class="card-header">
-          <div class="card-title">跨系统双向剪贴板</div>
+          <div class="card-title">跨系统双向剪贴板（文本 + 截图图片）</div>
           <button id="btnReadLocalClip" class="btn xs ghost">读取本机剪贴板</button>
         </div>
-        <textarea id="clipBox" class="input" rows="6" placeholder="点击「拉取远端剪贴板」获取对方复制的文本，或输入内容推送到对方系统剪贴板..."></textarea>
-        <div style="display:flex;gap:10px;margin-top:14px">
-          <button id="btnClipGet" class="btn ghost" style="flex:1">⬇ 拉取远端并写入本机</button>
-          <button id="btnClipSet" class="btn" style="flex:1">⬆ 推送到远端系统剪贴板</button>
+        <textarea id="clipBox" class="input" rows="5" placeholder="点击「拉取远端剪贴板」获取对方复制的文本，或输入内容推送到对方系统剪贴板..."></textarea>
+        <div style="display:flex;gap:10px;margin-top:12px">
+          <button id="btnClipGet" class="btn ghost" style="flex:1">⬇ 拉取远端文本</button>
+          <button id="btnClipSet" class="btn" style="flex:1">⬆ 推送文本到远端</button>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:10px">
+          <button id="btnClipImgGet" type="button" class="btn sm ghost" style="flex:1">🖼 拉取远端截图到本机</button>
+          <button id="btnClipImgSet" type="button" class="btn sm ghost" style="flex:1">🖼 推送本机截图到远端</button>
+        </div>
+        <div id="clipImgPreviewWrap" style="display:none;margin-top:12px;padding:10px;border-radius:10px;background:#f8fafc;border:1px solid var(--border);text-align:center">
+          <div style="font-size:11.5px;color:var(--muted);margin-bottom:6px" id="clipImgLabel">剪贴板图片预览</div>
+          <img id="clipImgPreview" alt="Clipboard preview" style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" />
         </div>
       </div>
 
@@ -679,6 +694,10 @@
         <div class="field"><label>固定无人值守密码（可选，设置后与临时密码同时生效，重启被控生效）</label><input id="hostPermPwd" class="input" type="password" value="" placeholder="留空则仅允许首页临时密码连接" /></div>
       </div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:14px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="hostCloseToTray" checked style="width:16px;height:16px" />
+          <span>点击关闭按钮 (×) 时最小化到系统托盘继续守护运行</span>
+        </label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
           <input type="checkbox" id="hostAutoStart" style="width:16px;height:16px" />
           <span>启动 CopyToDesk 时自动开启本机被控服务（推荐无人值守勾选）</span>

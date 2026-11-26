@@ -6,14 +6,21 @@ use ctd_core::{clipboard, HostConfig, HostHandle, HostStatus, RemoteClient};
 use ctd_protocol::{key_mod_flags, MonitorSelectAckPayload};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 
 struct AppState {
     host: Arc<Mutex<Option<HostHandle>>>,
     client: Arc<RwLock<Option<Arc<RemoteClient>>>>,
+    close_to_tray: Arc<AtomicBool>,
+    quitting: Arc<AtomicBool>,
 }
 
 fn default_downloads_dir() -> PathBuf {
@@ -258,6 +265,12 @@ async fn remote_type(state: State<'_, AppState>, text: String) -> Result<(), Str
 }
 
 #[tauri::command]
+fn set_close_to_tray(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
+    state.close_to_tray.store(enabled, Ordering::Release);
+    Ok(enabled)
+}
+
+#[tauri::command]
 async fn local_clipboard_get() -> Result<String, String> {
     tokio::task::spawn_blocking(clipboard::get_text)
         .await
@@ -271,6 +284,27 @@ async fn local_clipboard_set(text: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn local_clipboard_get_image() -> Result<String, String> {
+    let png = tokio::task::spawn_blocking(clipboard::get_image_png)
+        .await
+        .map_err(|e| e.to_string())?;
+    if png.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(&png))
+}
+
+#[tauri::command]
+async fn local_clipboard_set_image(png_base64: String) -> Result<bool, String> {
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || clipboard::set_image_png(&png))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -293,6 +327,34 @@ async fn remote_clipboard_set(state: State<'_, AppState>, text: String) -> Resul
         .clone()
         .ok_or_else(|| "Not connected".to_string())?;
     c.clipboard_set(&text).await
+}
+
+#[tauri::command]
+async fn remote_clipboard_get_image(state: State<'_, AppState>) -> Result<String, String> {
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+    c.clipboard_get_image_base64().await
+}
+
+#[tauri::command]
+async fn remote_clipboard_set_image(
+    state: State<'_, AppState>,
+    png_base64: String,
+) -> Result<u32, String> {
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| e.to_string())?;
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+    c.clipboard_set_image_bytes(png).await
 }
 
 #[tauri::command]
@@ -390,6 +452,32 @@ async fn remote_download_file(
 }
 
 #[tauri::command]
+async fn remote_file_action(
+    state: State<'_, AppState>,
+    action: String,
+    remote_path: String,
+    new_name: Option<String>,
+) -> Result<String, String> {
+    let c = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected".to_string())?;
+    c.file_action(&action, &remote_path, new_name).await
+}
+
+#[tauri::command]
+async fn remote_cancel_transfer(state: State<'_, AppState>) -> Result<bool, String> {
+    let guard = state.client.read().await;
+    if let Some(c) = guard.as_ref() {
+        c.cancel_transfer();
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[tauri::command]
 fn open_downloads_dir() -> Result<String, String> {
     let dir = default_downloads_dir();
     #[cfg(target_os = "windows")]
@@ -416,14 +504,94 @@ async fn remote_exec_guarded(
     c.exec_guarded(&command, 5000).await
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState {
             host: Arc::new(Mutex::new(None)),
             client: Arc::new(RwLock::new(None)),
+            close_to_tray: Arc::new(AtomicBool::new(true)),
+            quitting: Arc::new(AtomicBool::new(false)),
+        })
+        .setup(|app| {
+            let show_item =
+                MenuItem::with_id(app, "show", "显示 CopyToDesk 主界面", true, None::<&str>)?;
+            let kick_item =
+                MenuItem::with_id(app, "kick", "一键断开当前远控会话", true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "彻底退出 CopyToDesk", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &kick_item, &quit_item])?;
+
+            let mut builder = TrayIconBuilder::with_id("ctd-tray")
+                .tooltip("CopyToDesk — 远程控制工作台")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .on_menu_event(|app_handle, event| match event.id.as_ref() {
+                    "show" => show_main_window(app_handle),
+                    "kick" => {
+                        let st_host = app_handle.state::<AppState>().host.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(h) = st_host.lock().await.as_ref() {
+                                h.kick_viewers();
+                            }
+                        });
+                    }
+                    "quit" => {
+                        let st = app_handle.state::<AppState>();
+                        st.quitting.store(true, Ordering::Release);
+                        let host_arc = st.host.clone();
+                        let client_arc = st.client.clone();
+                        let ah = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(h) = host_arc.lock().await.take() {
+                                h.stop();
+                            }
+                            if let Some(c) = client_arc.write().await.take() {
+                                c.disconnect();
+                            }
+                            ah.exit(0);
+                        });
+                    }
+                    _ => {}
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                builder = builder.icon(icon);
+            }
+            let _tray = builder.build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let st = window.state::<AppState>();
+                if !st.quitting.load(Ordering::Acquire)
+                    && st.close_to_tray.load(Ordering::Acquire)
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_platform_info,
+            set_close_to_tray,
             start_host,
             stop_host,
             host_status,
@@ -440,12 +608,18 @@ fn main() {
             remote_type,
             local_clipboard_get,
             local_clipboard_set,
+            local_clipboard_get_image,
+            local_clipboard_set_image,
             remote_clipboard_get,
             remote_clipboard_set,
+            remote_clipboard_get_image,
+            remote_clipboard_set_image,
             remote_list_dir,
             remote_upload_base64,
             remote_upload_chunk,
             remote_download_file,
+            remote_file_action,
+            remote_cancel_transfer,
             open_downloads_dir,
             remote_exec_guarded
         ])

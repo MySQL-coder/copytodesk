@@ -116,6 +116,9 @@ window.addEventListener('DOMContentLoaded', () => {
   let scaleOneToOne = false;
   let savedDevices = [];
   let editingBookKey = null;
+  let renamingFilePath = null;
+  let transferActive = false;
+  let uploadCancelRequested = false;
   let autoTier = '1280:68';
   let webLoopToken = 0;
   let origW = 1280;
@@ -354,6 +357,7 @@ window.addEventListener('DOMContentLoaded', () => {
         hostPermPwd: $('hostPermPwd').value,
         hostBind: $('hostBind').value,
         hostRelay: $('hostRelay').value,
+        hostCloseToTray: $('hostCloseToTray').checked,
         hostAutoStart: $('hostAutoStart').checked,
         hostAllowInput: $('hostAllowInput').checked,
         hostExec: $('hostExec').checked,
@@ -393,6 +397,7 @@ window.addEventListener('DOMContentLoaded', () => {
           $('hostBind').value = (fromV1 && d.hostBind.trim() === '127.0.0.1:19800') ? '0.0.0.0:19800' : d.hostBind;
         }
         if (typeof d.hostRelay === 'string') $('hostRelay').value = d.hostRelay;
+        if (typeof d.hostCloseToTray === 'boolean') $('hostCloseToTray').checked = d.hostCloseToTray;
         if (typeof d.hostAutoStart === 'boolean') $('hostAutoStart').checked = d.hostAutoStart;
         if (typeof d.hostAllowInput === 'boolean') $('hostAllowInput').checked = d.hostAllowInput;
         if (typeof d.hostExec === 'boolean') $('hostExec').checked = d.hostExec;
@@ -476,6 +481,12 @@ window.addEventListener('DOMContentLoaded', () => {
   for (const id of ['hostAutoStart', 'hostAllowInput', 'hostExec', 'connSavePwd']) {
     $(id).addEventListener('change', saveSettings);
   }
+  $('hostCloseToTray').addEventListener('change', () => {
+    saveSettings();
+    if (isTauri && invoke) {
+      invoke('set_close_to_tray', { enabled: $('hostCloseToTray').checked }).catch(() => {});
+    }
+  });
 
   $('btnClearBook').addEventListener('click', () => {
     savedDevices = [];
@@ -1271,6 +1282,11 @@ window.addEventListener('DOMContentLoaded', () => {
           const localTxt = await invoke('local_clipboard_get');
           if (localTxt) {
             await invoke('remote_clipboard_set', { text: localTxt });
+          } else {
+            const localPng = await invoke('local_clipboard_get_image');
+            if (localPng) {
+              await invoke('remote_clipboard_set_image', { pngBase64: localPng });
+            }
           }
         } catch {
           // continue key injection
@@ -1286,11 +1302,16 @@ window.addEventListener('DOMContentLoaded', () => {
             if (remoteTxt) {
               await invoke('local_clipboard_set', { text: remoteTxt });
               $('clipBox').value = remoteTxt;
+            } else {
+              const remotePng = await invoke('remote_clipboard_get_image');
+              if (remotePng) {
+                await invoke('local_clipboard_set_image', { pngBase64: remotePng });
+              }
             }
           } catch {
             // ignore
           }
-        }, 150);
+        }, 160);
       }
     }
   });
@@ -1386,16 +1407,72 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ---- Chunked Streaming File Transfer ----
-  function showTransferProgress(title, transferred, total, speedMBs) {
+  function showClipImagePreview(b64, label) {
+    if (!b64) return;
+    $('clipImgPreviewWrap').style.display = 'block';
+    $('clipImgLabel').textContent = label;
+    $('clipImgPreview').src = `data:image/png;base64,${b64}`;
+  }
+
+  $('btnClipImgGet').addEventListener('click', async () => {
+    if (!isTauri || !invoke || !connected) {
+      toast('请先在桌面端连接远端设备', 'err');
+      return;
+    }
+    try {
+      const b64 = await invoke('remote_clipboard_get_image');
+      if (!b64) {
+        toast('远端系统剪贴板当前没有图片/截图');
+        return;
+      }
+      await invoke('local_clipboard_set_image', { pngBase64: b64 });
+      showClipImagePreview(b64, '✓ 已从远端拉取并写入本机系统剪贴板');
+      toast('已将远端截图同步到本机剪贴板（可直接 Ctrl+V 粘贴）', 'ok');
+    } catch (e) {
+      toast('拉取远端图片失败: ' + e, 'err');
+    }
+  });
+
+  $('btnClipImgSet').addEventListener('click', async () => {
+    if (!isTauri || !invoke || !connected) {
+      toast('请先在桌面端连接远端设备', 'err');
+      return;
+    }
+    try {
+      const b64 = await invoke('local_clipboard_get_image');
+      if (!b64) {
+        toast('本机系统剪贴板当前没有图片（可先截图后再试）');
+        return;
+      }
+      const bytes = await invoke('remote_clipboard_set_image', { pngBase64: b64 });
+      showClipImagePreview(b64, `✓ 已推送本机截图至远端剪贴板 (${formatBytes(bytes)})`);
+      toast('本机截图已推送至远端系统剪贴板', 'ok');
+    } catch (e) {
+      toast('推送本机图片失败: ' + e, 'err');
+    }
+  });
+
+  // ---- Chunked Streaming File Transfer + Full Sandbox File Manager ----
+  function showTransferProgress(title, transferred, total, speedMBs, active = false) {
+    transferActive = active;
     const box = $('transferProgressBox');
     box.style.display = 'block';
+    $('btnCancelTransfer').style.display = active ? 'inline-flex' : 'none';
     const pct = total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 100;
     $('transferTitle').textContent = title;
     const speedStr = speedMBs > 0 ? ` · ${speedMBs.toFixed(1)} MB/s` : '';
     $('transferStat').textContent = `${pct}% (${formatBytes(transferred)} / ${formatBytes(total)}${speedStr})`;
     $('transferBar').style.width = `${pct}%`;
   }
+
+  $('btnCancelTransfer').addEventListener('click', () => {
+    if (!transferActive) return;
+    uploadCancelRequested = true;
+    if (isTauri && invoke) {
+      invoke('remote_cancel_transfer').catch(() => {});
+    }
+    toast('正在中止当前传输...');
+  });
 
   function joinRemotePath(dir, name) {
     const cleanDir = String(dir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -1409,13 +1486,13 @@ window.addEventListener('DOMContentLoaded', () => {
       return;
     }
     try {
-      showTransferProgress(`⬇ 正在下载 ${fileName}`, 0, 1, 0);
+      showTransferProgress(`⬇ 正在下载 ${fileName}`, 0, 1, 0, true);
       if (isTauri && invoke) {
         const t0 = performance.now();
         const res = await invoke('remote_download_file', { remotePath: relPath });
         const sec = Math.max(0.01, (performance.now() - t0) / 1000);
         const speed = (res.bytes / (1024 * 1024)) / sec;
-        showTransferProgress(`✓ 下载完成 ${fileName}`, res.bytes, res.bytes, speed);
+        showTransferProgress(`✓ 下载完成 ${fileName}`, res.bytes, res.bytes, speed, false);
         log(`文件下载成功: ${res.localPath} (${res.bytes} B, SHA256=${res.sha256.slice(0, 16)}...)`);
         toast(`已保存至 ${res.localPath}`, 'ok');
       } else {
@@ -1445,9 +1522,24 @@ window.addEventListener('DOMContentLoaded', () => {
         toast(`已下载 ${fileName}`, 'ok');
       }
     } catch (e) {
-      toast('下载失败: ' + e, 'err');
-      log('下载失败: ' + e);
+      showTransferProgress(`✕ 下载已停止 (${fileName})`, 0, 1, 0, false);
+      toast('下载中断: ' + e, 'err');
+      log('下载中断: ' + e);
     }
+  }
+
+  async function runRemoteFileAction(action, relPath, newName = null) {
+    if (!connected || !isTauri || !invoke) {
+      toast('请先在桌面端连接远端设备', 'err');
+      return false;
+    }
+    const raw = await invoke('remote_file_action', { action, remotePath: relPath, newName });
+    const res = JSON.parse(raw);
+    if (!res.ok) {
+      toast(`操作失败: ${res.error}`, 'err');
+      return false;
+    }
+    return true;
   }
 
   async function refreshRemoteDir() {
@@ -1474,28 +1566,58 @@ window.addEventListener('DOMContentLoaded', () => {
     for (const f of res.entries || []) {
       const row = document.createElement('div');
       row.className = 'file-row';
+      const entryRelPath = joinRemotePath(curDir, f.name);
 
-      const nameBtn = document.createElement('button');
-      nameBtn.type = 'button';
-      nameBtn.className = 'file-name-btn' + (f.isDir ? ' dir' : '');
-      nameBtn.textContent = `${f.isDir ? '📁 ' : '📄 '}${f.name}`;
-      if (f.isDir) {
-        nameBtn.addEventListener('click', () => {
-          $('dirPath').value = joinRemotePath(curDir, f.name);
+      if (renamingFilePath === entryRelPath) {
+        const inp = document.createElement('input');
+        inp.className = 'input';
+        inp.style.height = '28px';
+        inp.style.fontSize = '12.5px';
+        inp.value = f.name;
+        const commitRename = async () => {
+          const nextName = inp.value.trim();
+          renamingFilePath = null;
+          if (nextName && nextName !== f.name) {
+            if (await runRemoteFileAction('rename', entryRelPath, nextName)) {
+              toast(`已重命名为 ${nextName}`, 'ok');
+            }
+          }
           refreshRemoteDir().catch(() => {});
+        };
+        inp.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') commitRename();
+          if (ev.key === 'Escape') {
+            renamingFilePath = null;
+            refreshRemoteDir().catch(() => {});
+          }
         });
+        inp.addEventListener('blur', commitRename);
+        row.appendChild(inp);
+        setTimeout(() => inp.focus(), 10);
+      } else {
+        const nameBtn = document.createElement('button');
+        nameBtn.type = 'button';
+        nameBtn.className = 'file-name-btn' + (f.isDir ? ' dir' : '');
+        nameBtn.textContent = `${f.isDir ? '📁 ' : '📄 '}${f.name}`;
+        if (f.isDir) {
+          nameBtn.addEventListener('click', () => {
+            $('dirPath').value = entryRelPath;
+            refreshRemoteDir().catch(() => {});
+          });
+        }
+        row.appendChild(nameBtn);
       }
-      row.appendChild(nameBtn);
 
       const right = document.createElement('div');
       right.style.display = 'flex';
       right.style.alignItems = 'center';
-      right.style.gap = '8px';
+      right.style.gap = '6px';
+      right.style.flexShrink = '0';
 
       const metaSpan = document.createElement('span');
       metaSpan.style.color = 'var(--muted)';
       metaSpan.style.fontSize = '12px';
-      metaSpan.textContent = f.isDir ? '文件夹' : formatBytes(f.size);
+      metaSpan.textContent = f.isDir ? '目录' : formatBytes(f.size);
       right.appendChild(metaSpan);
 
       if (!f.isDir) {
@@ -1504,9 +1626,39 @@ window.addEventListener('DOMContentLoaded', () => {
         dlBtn.className = 'btn xs ghost';
         dlBtn.textContent = '⬇ 下载';
         dlBtn.addEventListener('click', () => {
-          downloadRemoteEntry(joinRemotePath(curDir, f.name), f.name);
+          downloadRemoteEntry(entryRelPath, f.name);
         });
         right.appendChild(dlBtn);
+      }
+
+      if (isTauri) {
+        const rnBtn = document.createElement('button');
+        rnBtn.type = 'button';
+        rnBtn.className = 'icon-btn';
+        rnBtn.style.width = '26px';
+        rnBtn.style.height = '26px';
+        rnBtn.title = '重命名';
+        rnBtn.textContent = '✎';
+        rnBtn.addEventListener('click', () => {
+          renamingFilePath = entryRelPath;
+          refreshRemoteDir().catch(() => {});
+        });
+        right.appendChild(rnBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'icon-btn';
+        delBtn.style.width = '26px';
+        delBtn.style.height = '26px';
+        delBtn.title = '删除';
+        delBtn.textContent = '🗑';
+        delBtn.addEventListener('click', async () => {
+          if (await runRemoteFileAction('delete', entryRelPath, null)) {
+            toast(`已删除 ${f.name}`, 'ok');
+            refreshRemoteDir().catch(() => {});
+          }
+        });
+        right.appendChild(delBtn);
       }
 
       row.appendChild(right);
@@ -1529,6 +1681,28 @@ window.addEventListener('DOMContentLoaded', () => {
     refreshRemoteDir().catch(() => {});
   });
 
+  $('btnMkdir').addEventListener('click', async () => {
+    const name = $('newFolderName').value.trim();
+    if (!name) {
+      toast('请先输入新文件夹名称');
+      return;
+    }
+    const curDir = $('dirPath').value.trim();
+    const rel = joinRemotePath(curDir, name);
+    try {
+      if (await runRemoteFileAction('mkdir', rel, null)) {
+        $('newFolderName').value = '';
+        toast(`已创建文件夹 ${name}`, 'ok');
+        refreshRemoteDir().catch(() => {});
+      }
+    } catch (e) {
+      toast('创建文件夹失败: ' + e, 'err');
+    }
+  });
+  $('newFolderName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('btnMkdir').click();
+  });
+
   $('btnOpenDownloads').addEventListener('click', async () => {
     if (!isTauri || !invoke) {
       toast('浏览器模式文件直接保存至系统默认下载目录');
@@ -1548,16 +1722,18 @@ window.addEventListener('DOMContentLoaded', () => {
       toast('请先连接远端设备后再上传文件', 'err');
       return;
     }
+    uploadCancelRequested = false;
     const baseDir = $('upTargetDir').value.trim() || $('dirPath').value.trim();
 
     for (const file of Array.from(files)) {
+      if (uploadCancelRequested) break;
       const remotePath = joinRemotePath(baseDir, file.name);
       const total = file.size;
       const uploadId = `up-${randomHex(6)}`;
       const t0 = performance.now();
 
       try {
-        showTransferProgress(`⬆ 正在上传 ${file.name}`, 0, Math.max(1, total), 0);
+        showTransferProgress(`⬆ 正在上传 ${file.name}`, 0, Math.max(1, total), 0, true);
 
         if (isTauri && invoke) {
           if (total === 0) {
@@ -1572,6 +1748,12 @@ window.addEventListener('DOMContentLoaded', () => {
           } else {
             let offset = 0;
             while (offset < total) {
+              if (uploadCancelRequested) {
+                await invoke('remote_file_action', { action: 'cancelUpload', remotePath, newName: null }).catch(() => {});
+                showTransferProgress(`✕ 已取消上传 ${file.name}`, offset, total, 0, false);
+                toast(`已取消上传 ${file.name}`);
+                return;
+              }
               const end = Math.min(offset + FILE_CHUNK_BYTES, total);
               const eof = end >= total;
               const ab = await file.slice(offset, end).arrayBuffer();
@@ -1587,12 +1769,12 @@ window.addEventListener('DOMContentLoaded', () => {
               offset = end;
               const sec = Math.max(0.01, (performance.now() - t0) / 1000);
               const speed = (offset / (1024 * 1024)) / sec;
-              showTransferProgress(`⬆ 正在上传 ${file.name}`, offset, total, speed);
+              showTransferProgress(`⬆ 正在上传 ${file.name}`, offset, total, speed, true);
             }
           }
           const sec = Math.max(0.01, (performance.now() - t0) / 1000);
           const speed = (total / (1024 * 1024)) / sec;
-          showTransferProgress(`✓ 上传成功 ${file.name} (SHA-256 已校验)`, total, Math.max(1, total), speed);
+          showTransferProgress(`✓ 上传成功 ${file.name} (SHA-256 已校验)`, total, Math.max(1, total), speed, false);
           log(`分块上传完成: ${remotePath} (${formatBytes(total)})`);
           toast(`已上传 ${file.name} (${formatBytes(total)})`, 'ok');
         } else {
@@ -1615,6 +1797,7 @@ window.addEventListener('DOMContentLoaded', () => {
           toast(`已上传 ${file.name}`, 'ok');
         }
       } catch (e) {
+        showTransferProgress(`✕ 上传中断 (${file.name})`, 0, 1, 0, false);
         toast(`上传 ${file.name} 失败: ` + e, 'err');
         log(`上传失败 (${file.name}): ` + e);
         return;
@@ -1732,11 +1915,12 @@ window.addEventListener('DOMContentLoaded', () => {
         listen('file-transfer-progress', (event) => {
           const p = event.payload || {};
           if (p.direction === 'download') {
-            showTransferProgress(`⬇ 正在下载 ${p.name}`, p.transferred || 0, p.total || 1, 0);
+            showTransferProgress(`⬇ 正在下载 ${p.name}`, p.transferred || 0, p.total || 1, 0, true);
           }
         });
       }
       try {
+        await invoke('set_close_to_tray', { enabled: $('hostCloseToTray').checked }).catch(() => {});
         const info = await invoke('get_platform_info');
         localOs = info.os || localOs;
         updateKeyMapBtn();
