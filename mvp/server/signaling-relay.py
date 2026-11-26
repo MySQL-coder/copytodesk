@@ -32,6 +32,8 @@ stats = {"totalTunnels": 0, "totalBytesRelayed": 0, "hijackBlocks": 0}
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_DIR = os.path.join(BASE_DIR, "ui")
 OWNERS_FILE = os.path.join(BASE_DIR, "device_owners.json")
+ADMIN_KEY = os.environ.get("CTD_ADMIN_KEY", "").strip()
+ALLOW_PUBLIC_LIST = False
 
 
 def load_device_owners() -> dict:
@@ -340,13 +342,17 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             return
         method, path = parts[0], parts[1].split("?")[0]
         content_len = 0
+        req_admin_key = ""
         while True:
             hline = await asyncio.wait_for(reader.readline(), timeout=5.0)
             if not hline or hline in (b"\r\n", b"\n"):
                 break
             s = hline.decode("latin1")
-            if s.lower().startswith("content-length:"):
+            low = s.lower()
+            if low.startswith("content-length:"):
                 content_len = int(s.split(":", 1)[1].strip())
+            elif low.startswith("x-admin-key:"):
+                req_admin_key = s.split(":", 1)[1].strip()
         body_raw = await asyncio.wait_for(reader.readexactly(content_len), timeout=10.0) if content_len > 0 else b""
 
         if method == "GET" and path == "/":
@@ -358,20 +364,25 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             data = open(p, "rb").read() if os.path.exists(p) else b""
             writer.write(http_response("200 OK", "application/javascript; charset=utf-8", data))
         elif method == "GET" and path == "/api/devices":
-            devs = [
-                {
-                    "deviceId": h["deviceId"],
-                    "name": h["name"],
-                    "owned": h.get("owned", False),
-                    "lanAddrs": h.get("lanAddrs", []),
-                    "registeredAt": h["registeredAt"],
-                    "lastSeenAt": h.get("lastSeenAt", h["registeredAt"]),
-                }
-                for h in hosts.values()
-            ]
-            writer.write(http_response("200 OK", "application/json", json.dumps({"devices": devs}).encode("utf-8")))
+            can_list = ALLOW_PUBLIC_LIST or (bool(ADMIN_KEY) and secrets.compare_digest(req_admin_key, ADMIN_KEY))
+            if not can_list:
+                payload = {"devices": [], "privacyProtected": True, "onlineCount": len(hosts)}
+                writer.write(http_response("200 OK", "application/json", json.dumps(payload).encode("utf-8")))
+            else:
+                devs = [
+                    {
+                        "deviceId": h["deviceId"],
+                        "name": h["name"],
+                        "owned": h.get("owned", False),
+                        "lanAddrs": h.get("lanAddrs", []),
+                        "registeredAt": h["registeredAt"],
+                        "lastSeenAt": h.get("lastSeenAt", h["registeredAt"]),
+                    }
+                    for h in hosts.values()
+                ]
+                writer.write(http_response("200 OK", "application/json", json.dumps({"devices": devs, "privacyProtected": False}).encode("utf-8")))
         elif method == "GET" and path == "/api/health":
-            out = {"status": "ok", "version": "0.4.0", "onlineHosts": len(hosts), "ownedDevices": len(device_owners), **stats}
+            out = {"status": "ok", "version": "0.6.0", "privacyProtected": not ALLOW_PUBLIC_LIST, "onlineHosts": len(hosts), "ownedDevices": len(device_owners), **stats}
             writer.write(http_response("200 OK", "application/json", json.dumps(out).encode("utf-8")))
         elif method == "POST" and path == "/api/screenshot":
             b = json.loads(body_raw.decode("utf-8"))
@@ -471,16 +482,19 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 
 
 async def main():
+    global ALLOW_PUBLIC_LIST
     ap = argparse.ArgumentParser()
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--http-port", type=int, default=19900)
     ap.add_argument("--relay-port", type=int, default=19901)
+    ap.add_argument("--allow-public-list", action="store_true")
     args = ap.parse_args()
+    ALLOW_PUBLIC_LIST = bool(args.allow_public_list)
 
     relay_srv = await asyncio.start_server(handle_relay_client, args.bind, args.relay_port)
     http_srv = await asyncio.start_server(lambda r, w: handle_http(r, w, args.relay_port), args.bind, args.http_port)
-    print(f"[SignalingRelay-Py v0.4.0] TCP Relay listening on {args.bind}:{args.relay_port}", flush=True)
-    print(f"[SignalingRelay-Py v0.4.0] HTTP Web Viewer listening on http://{args.bind}:{args.http_port}", flush=True)
+    print(f"[SignalingRelay-Py v0.6.0] TCP Relay listening on {args.bind}:{args.relay_port} (privacy={not ALLOW_PUBLIC_LIST})", flush=True)
+    print(f"[SignalingRelay-Py v0.6.0] HTTP Web Viewer listening on http://{args.bind}:{args.http_port}", flush=True)
     async with relay_srv, http_srv:
         await asyncio.gather(relay_srv.serve_forever(), http_srv.serve_forever())
 

@@ -151,6 +151,12 @@ impl ScreenCapturer for SyntheticCapturer {
 }
 
 #[cfg(feature = "native-capture")]
+thread_local! {
+    static CACHED_XCAP_MONITOR: std::cell::RefCell<Option<(u16, xcap::Monitor)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "native-capture")]
 pub struct NativeXcapCapturer {
     monitors: Vec<MonitorInfo>,
     active_idx: u16,
@@ -268,6 +274,9 @@ impl ScreenCapturer for NativeXcapCapturer {
     }
 
     fn select_monitor(&mut self, index: u16) -> Option<MonitorInfo> {
+        CACHED_XCAP_MONITOR.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
         let probed = enumerate_xcap_monitors()?;
         let found = probed.iter().find(|(info, _)| info.index == index)?.clone();
         self.monitors = probed.into_iter().map(|(info, _)| info).collect();
@@ -278,36 +287,62 @@ impl ScreenCapturer for NativeXcapCapturer {
     }
 
     fn capture_rgba(&mut self, buf: &mut Vec<u8>) -> bool {
-        let Ok(monitors) = xcap::Monitor::all() else {
-            return false;
-        };
-        let idx = self.active_idx as usize;
-        let Some(monitor) = monitors
-            .into_iter()
-            .nth(idx)
-            .or_else(|| xcap::Monitor::all().ok().and_then(|v| v.into_iter().next()))
-        else {
-            return false;
-        };
-        if let Ok(img) = monitor.capture_image() {
-            let expected = (self.width * self.height * 4) as usize;
-            let raw = if img.width() == self.width && img.height() == self.height {
-                img.into_raw()
-            } else {
-                image::imageops::resize(
-                    &img,
-                    self.width,
-                    self.height,
-                    image::imageops::FilterType::Triangle,
-                )
-                .into_raw()
+        let active = self.active_idx;
+        let target_w = self.width;
+        let target_h = self.height;
+
+        CACHED_XCAP_MONITOR.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            let needs_refresh = match guard.as_ref() {
+                Some((idx, _)) => *idx != active,
+                None => true,
             };
-            if raw.len() == expected {
-                *buf = raw;
-                return true;
+            if needs_refresh {
+                if let Ok(monitors) = xcap::Monitor::all() {
+                    let chosen = monitors
+                        .into_iter()
+                        .nth(active as usize)
+                        .or_else(|| xcap::Monitor::all().ok().and_then(|v| v.into_iter().next()));
+                    *guard = chosen.map(|m| (active, m));
+                }
             }
-        }
-        false
+
+            let captured = guard.as_ref().and_then(|(_, m)| m.capture_image().ok());
+            let img = match captured {
+                Some(i) => i,
+                None => {
+                    // Display handle invalidated (e.g. resolution change) -> refresh once
+                    *guard = None;
+                    let Ok(monitors) = xcap::Monitor::all() else {
+                        return false;
+                    };
+                    let Some(m) = monitors.into_iter().nth(active as usize) else {
+                        return false;
+                    };
+                    let Ok(i) = m.capture_image() else {
+                        return false;
+                    };
+                    *guard = Some((active, m));
+                    i
+                }
+            };
+
+            let expected = (target_w * target_h * 4) as usize;
+            if img.width() == target_w && img.height() == target_h {
+                let raw = img.into_raw();
+                if raw.len() == expected {
+                    *buf = raw;
+                    return true;
+                }
+                false
+            } else {
+                let src_w = img.width();
+                let src_h = img.height();
+                let raw = img.into_raw();
+                crate::codec::downsample_rgba_crisp(&raw, src_w, src_h, target_w, target_h, buf);
+                buf.len() == expected
+            }
+        })
     }
 }
 

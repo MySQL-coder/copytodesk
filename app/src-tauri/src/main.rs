@@ -101,6 +101,7 @@ async fn connect_remote(
     let app_frames = app.clone();
     let app_cursor = app.clone();
     let app_rtt = app.clone();
+    let app_disc = app.clone();
     let client = RemoteClient::connect_streaming(
         &params,
         move |tile_ev| {
@@ -111,6 +112,9 @@ async fn connect_remote(
         },
         move |rtt_ms| {
             let _ = app_rtt.emit("remote-rtt", rtt_ms);
+        },
+        move |reason| {
+            let _ = app_disc.emit("remote-disconnected", reason);
         },
     )
     .await?;

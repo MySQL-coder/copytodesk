@@ -75,6 +75,14 @@ window.addEventListener('DOMContentLoaded', () => {
     return btoa(binary);
   }
 
+  function base64ToUint8(b64) {
+    const bin = atob(b64);
+    const len = bin.length;
+    const out = new Uint8Array(len);
+    for (let i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
   function getTauriInvoke() {
     if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
       return window.__TAURI__.core.invoke;
@@ -100,8 +108,14 @@ window.addEventListener('DOMContentLoaded', () => {
   let hostRunning = false;
   let connMode = 'relay';
   let connected = false;
+  let reconnecting = false;
+  let reconnToken = 0;
+  let lastConnectParams = null;
   let ctrlCmdMapEnabled = false;
+  let invertScroll = false;
   let scaleOneToOne = false;
+  let savedDevices = [];
+  let editingBookKey = null;
   let autoTier = '1280:68';
   let webLoopToken = 0;
   let origW = 1280;
@@ -142,6 +156,150 @@ window.addEventListener('DOMContentLoaded', () => {
     $('hud').textContent = `${streamW}×${streamH} · ${curFps} FPS · ${curKbps.toFixed(0)} KB/s${rttPart}${refPart}`;
   }
 
+  function updateScrollDirBtn() {
+    const btn = $('btnScrollDir');
+    if (!btn) return;
+    btn.classList.toggle('active', invertScroll);
+    btn.textContent = invertScroll ? '⇅ 滚轮反向' : '⇅ 滚轮正向';
+  }
+
+  function renderSavedBook() {
+    const wrap = $('savedBookWrap');
+    const grid = $('savedBookGrid');
+    if (!wrap || !grid) return;
+    if (!Array.isArray(savedDevices) || savedDevices.length === 0) {
+      wrap.style.display = 'none';
+      grid.innerHTML = '';
+      return;
+    }
+    wrap.style.display = 'block';
+    grid.innerHTML = '';
+
+    for (const item of savedDevices) {
+      const card = document.createElement('div');
+      card.className = 'book-card';
+
+      const left = document.createElement('div');
+      left.style.minWidth = '0';
+      left.style.flex = '1';
+
+      if (editingBookKey === item.key) {
+        const inp = document.createElement('input');
+        inp.className = 'input';
+        inp.style.height = '28px';
+        inp.style.fontSize = '12.5px';
+        inp.value = item.alias || '';
+        inp.placeholder = '输入设备备注名（回车保存）';
+        inp.addEventListener('click', (e) => e.stopPropagation());
+        const commitAlias = () => {
+          item.alias = inp.value.trim();
+          editingBookKey = null;
+          saveSettings();
+          renderSavedBook();
+        };
+        inp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') commitAlias();
+          if (e.key === 'Escape') {
+            editingBookKey = null;
+            renderSavedBook();
+          }
+        });
+        inp.addEventListener('blur', commitAlias);
+        left.appendChild(inp);
+        setTimeout(() => inp.focus(), 10);
+      } else {
+        const title = document.createElement('div');
+        title.style.fontWeight = '600';
+        title.style.fontSize = '13px';
+        title.style.overflow = 'hidden';
+        title.style.textOverflow = 'ellipsis';
+        title.style.whiteSpace = 'nowrap';
+        const dispTarget = item.mode === 'relay' ? formatDeviceCode(item.target) : item.target;
+        title.textContent = item.alias ? `${item.alias} (${dispTarget})` : dispTarget;
+
+        const sub = document.createElement('div');
+        sub.style.fontSize = '11px';
+        sub.style.color = 'var(--muted)';
+        const modeTag = item.mode === 'relay' ? '🌐 设备码' : '⚡ 直连';
+        const pwdTag = item.token ? ' · 已存密' : '';
+        sub.textContent = `${modeTag}${pwdTag}`;
+
+        left.appendChild(title);
+        left.appendChild(sub);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'book-actions';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'icon-btn';
+      editBtn.style.width = '26px';
+      editBtn.style.height = '26px';
+      editBtn.title = '修改备注名';
+      editBtn.textContent = '✎';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        editingBookKey = item.key;
+        renderSavedBook();
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'icon-btn';
+      delBtn.style.width = '26px';
+      delBtn.style.height = '26px';
+      delBtn.title = '移除记录';
+      delBtn.textContent = '✕';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        savedDevices = savedDevices.filter((x) => x.key !== item.key);
+        saveSettings();
+        renderSavedBook();
+      });
+
+      actions.appendChild(editBtn);
+      actions.appendChild(delBtn);
+      card.appendChild(left);
+      card.appendChild(actions);
+
+      card.addEventListener('click', () => {
+        if (editingBookKey === item.key) return;
+        applyConnMode(item.mode);
+        if (item.mode === 'relay') {
+          $('connDevId').value = item.target;
+        } else {
+          $('connDirect').value = item.target;
+        }
+        if (item.token) {
+          $('connToken').value = item.token;
+        }
+        saveSettings();
+        $('btnConnect').click();
+      });
+
+      grid.appendChild(card);
+    }
+  }
+
+  function recordSavedDevice(mode, target, token, remoteOsHint) {
+    const cleanTarget = String(target || '').trim();
+    if (!cleanTarget) return;
+    const key = `${mode}:${cleanTarget}`;
+    const existing = savedDevices.find((x) => x.key === key);
+    const keepPwd = $('connSavePwd').checked;
+    const entry = {
+      key,
+      mode,
+      target: cleanTarget,
+      alias: existing && existing.alias ? existing.alias : (remoteOsHint ? `${remoteOsHint.toUpperCase()} 设备` : ''),
+      token: keepPwd ? token : '',
+      updatedAt: Date.now(),
+    };
+    savedDevices = [entry, ...savedDevices.filter((x) => x.key !== key)].slice(0, 12);
+    saveSettings();
+    renderSavedBook();
+  }
   function updateKeyMapBtn() {
     const btn = $('btnKeyMap');
     if (!btn) return;
@@ -196,13 +354,17 @@ window.addEventListener('DOMContentLoaded', () => {
         hostPermPwd: $('hostPermPwd').value,
         hostBind: $('hostBind').value,
         hostRelay: $('hostRelay').value,
+        hostAutoStart: $('hostAutoStart').checked,
         hostAllowInput: $('hostAllowInput').checked,
         hostExec: $('hostExec').checked,
         connMode,
         connDirect: $('connDirect').value,
         connDevId: $('connDevId').value,
         connToken: $('connToken').value,
+        connSavePwd: $('connSavePwd').checked,
         viewerQuality: $('viewerQuality').value,
+        invertScroll,
+        savedDevices,
       };
       localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(data));
       updatePermBadge();
@@ -231,12 +393,16 @@ window.addEventListener('DOMContentLoaded', () => {
           $('hostBind').value = (fromV1 && d.hostBind.trim() === '127.0.0.1:19800') ? '0.0.0.0:19800' : d.hostBind;
         }
         if (typeof d.hostRelay === 'string') $('hostRelay').value = d.hostRelay;
+        if (typeof d.hostAutoStart === 'boolean') $('hostAutoStart').checked = d.hostAutoStart;
         if (typeof d.hostAllowInput === 'boolean') $('hostAllowInput').checked = d.hostAllowInput;
         if (typeof d.hostExec === 'boolean') $('hostExec').checked = d.hostExec;
         if (typeof d.connDirect === 'string') $('connDirect').value = d.connDirect;
         if (typeof d.connDevId === 'string') $('connDevId').value = d.connDevId;
         if (typeof d.connToken === 'string') $('connToken').value = d.connToken;
+        if (typeof d.connSavePwd === 'boolean') $('connSavePwd').checked = d.connSavePwd;
         if (typeof d.viewerQuality === 'string') $('viewerQuality').value = d.viewerQuality;
+        if (typeof d.invertScroll === 'boolean') invertScroll = d.invertScroll;
+        if (Array.isArray(d.savedDevices)) savedDevices = d.savedDevices;
         if (d.connMode === 'direct' || d.connMode === 'relay') connMode = d.connMode;
       }
       if (!deviceSecret) {
@@ -307,9 +473,16 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  for (const id of ['hostAllowInput', 'hostExec']) {
+  for (const id of ['hostAutoStart', 'hostAllowInput', 'hostExec', 'connSavePwd']) {
     $(id).addEventListener('change', saveSettings);
   }
+
+  $('btnClearBook').addEventListener('click', () => {
+    savedDevices = [];
+    saveSettings();
+    renderSavedBook();
+    toast('已清空设备簿记录');
+  });
 
   $('btnRotateSecret').addEventListener('click', () => {
     deviceSecret = randomHex(16);
@@ -352,6 +525,10 @@ window.addEventListener('DOMContentLoaded', () => {
       const data = await r.json();
       const wrap = $('devCards');
       wrap.innerHTML = '';
+      if (data.privacyProtected) {
+        log(`中继隐私防枚举已开启（当前在线设备总数: ${data.onlineCount || 0}，请直接输入目标设备码连接）`);
+        return;
+      }
       for (const d of data.devices || []) {
         const card = document.createElement('div');
         card.className = 'dev-card';
@@ -555,8 +732,29 @@ window.addEventListener('DOMContentLoaded', () => {
     }, 1400);
   }
 
-  // ---- True Incremental Tile Push Renderer ----
+  // ---- Off-Main-Thread createImageBitmap Tile Renderer + Zero-Black-Flash Resize ----
   let renderChain = Promise.resolve();
+  const snapCanvas = document.createElement('canvas');
+  const snapCtx = snapCanvas.getContext('2d');
+
+  async function decodeTileImage(t) {
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const u8 = base64ToUint8(t.dataBase64);
+        const blob = new Blob([u8], { type: t.mime });
+        const bmp = await createImageBitmap(blob);
+        return { bmp, isBitmap: true, x: t.x, y: t.y, w: t.w, h: t.h };
+      } catch {
+        // fall through to Image element fallback
+      }
+    }
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ bmp: img, isBitmap: false, x: t.x, y: t.y, w: t.w, h: t.h });
+      img.onerror = () => resolve(null);
+      img.src = `data:${t.mime};base64,${t.dataBase64}`;
+    });
+  }
 
   function handleTilePushEvent(ev) {
     if (!connected) return;
@@ -570,22 +768,26 @@ window.addEventListener('DOMContentLoaded', () => {
     renderChain = renderChain.then(async () => {
       if (!connected) return;
       if (cvs.width !== ev.screenW || cvs.height !== ev.screenH) {
+        const hadPixels = cvs.width > 0 && cvs.height > 0 && !ev.isKeyFrame;
+        if (hadPixels) {
+          snapCanvas.width = cvs.width;
+          snapCanvas.height = cvs.height;
+          snapCtx.drawImage(cvs, 0, 0);
+        }
         cvs.width = ev.screenW;
         cvs.height = ev.screenH;
+        if (hadPixels) {
+          ctx.drawImage(snapCanvas, 0, 0, ev.screenW, ev.screenH);
+        }
       }
-      const decoded = await Promise.all(
-        (ev.tiles || []).map(
-          (t) =>
-            new Promise((resolve) => {
-              const img = new Image();
-              img.onload = () => resolve({ img, x: t.x, y: t.y, w: t.w, h: t.h });
-              img.onerror = () => resolve(null);
-              img.src = `data:${t.mime};base64,${t.dataBase64}`;
-            })
-        )
-      );
+      const decoded = await Promise.all((ev.tiles || []).map(decodeTileImage));
       for (const item of decoded) {
-        if (item) ctx.drawImage(item.img, item.x, item.y, item.w, item.h);
+        if (item) {
+          ctx.drawImage(item.bmp, item.x, item.y, item.w, item.h);
+          if (item.isBitmap && typeof item.bmp.close === 'function') {
+            item.bmp.close();
+          }
+        }
       }
       updateHud();
     }).catch(() => {});
@@ -634,7 +836,84 @@ window.addEventListener('DOMContentLoaded', () => {
 
   window.addEventListener('blur', releaseAllRemoteModifiers);
 
+  function applyConnectedInfo(info) {
+    const ack = info.ack;
+    origW = ack.width;
+    origH = ack.height;
+    streamW = ack.width;
+    streamH = ack.height;
+    remoteOs = (ack.codecProbe && ack.codecProbe.os) ? String(ack.codecProbe.os) : '';
+
+    populateMonitorSelect(ack.monitors || [], ack.activeMonitor || 0);
+
+    ctrlCmdMapEnabled = Boolean(remoteOs && ((localOs === 'macos') !== (remoteOs === 'macos')));
+    updateKeyMapBtn();
+
+    $('e2eeBadge').style.display = info.encrypted ? 'inline-block' : 'none';
+    const rb = $('routeBadge');
+    rb.style.display = 'inline-block';
+    if (info.route === 'lan-p2p') {
+      rb.textContent = `⚡ 局域网直连 (${info.endpoint})`;
+      rb.style.color = '#86efac';
+    } else if (info.route === 'relay') {
+      rb.textContent = '🌐 公网中继穿透';
+      rb.style.color = '#93c5fd';
+    } else {
+      rb.textContent = `⚡ 直连 (${info.endpoint})`;
+      rb.style.color = '#86efac';
+    }
+  }
+
+  async function handleUnexpectedDisconnect(reason) {
+    if (!connected || reconnecting || !isTauri || !invoke || !lastConnectParams) return;
+    releaseAllRemoteModifiers();
+    reconnecting = true;
+    const myReconn = ++reconnToken;
+    const delays = [1200, 2400, 4500, 8000, 12000];
+    $('reconnBanner').style.display = 'inline-flex';
+    log(`远端连接中断 (${reason || 'network'})，启动自动重连...`);
+
+    for (let i = 0; i < delays.length; i++) {
+      if (!reconnecting || reconnToken !== myReconn) return;
+      $('reconnText').textContent = `🔄 连接中断，正在第 ${i + 1}/${delays.length} 次自动重连...`;
+      await new Promise((r) => setTimeout(r, delays[i]));
+      if (!reconnecting || reconnToken !== myReconn) return;
+      try {
+        const { maxWidth, quality } = currentQuality();
+        const params = { ...lastConnectParams, initialMaxWidth: maxWidth, initialQuality: quality };
+        const info = await invoke('connect_remote', { params });
+        if (!reconnecting || reconnToken !== myReconn) return;
+        applyConnectedInfo(info);
+        reconnecting = false;
+        $('reconnBanner').style.display = 'none';
+        log(`自动重连成功 [${info.route} -> ${info.endpoint}]`);
+        toast('已自动恢复远控连接', 'ok');
+        cvs.focus();
+        return;
+      } catch {
+        // continue backoff
+      }
+    }
+
+    if (reconnecting && reconnToken === myReconn) {
+      reconnecting = false;
+      $('reconnBanner').style.display = 'none';
+      toast('自动重连失败，远端可能已关闭或更换密码', 'err');
+      $('btnDisconnect').click();
+    }
+  }
+
+  $('btnCancelReconn').addEventListener('click', () => {
+    reconnecting = false;
+    reconnToken++;
+    $('reconnBanner').style.display = 'none';
+    $('btnDisconnect').click();
+  });
+
   $('btnConnect').addEventListener('click', async () => {
+    reconnecting = false;
+    reconnToken++;
+    $('reconnBanner').style.display = 'none';
     webLoopToken++;
     connected = false;
     invoke = getTauriInvoke();
@@ -645,48 +924,31 @@ window.addEventListener('DOMContentLoaded', () => {
     try {
       autoTier = '1280:68';
       const { maxWidth, quality } = currentQuality();
+      const useRelay = connMode === 'relay';
+      const targetStr = useRelay
+        ? ($('connDevId').value.replace(/\s+/g, '') || '888100200')
+        : ($('connDirect').value.trim() || '127.0.0.1:19800');
+
       if (isTauri) {
-        const useRelay = connMode === 'relay';
         const relayAddr = $('hostRelay').value.trim() || '38.34.13.214:19901';
-        const info = await invoke('connect_remote', {
-          params: {
-            directAddr: useRelay ? null : ($('connDirect').value.trim() || '127.0.0.1:19800'),
-            relayAddr: useRelay ? relayAddr : null,
-            deviceId: useRelay ? ($('connDevId').value.replace(/\s+/g, '') || '888100200') : null,
-            token: $('connToken').value,
-            clientName: `CopyToDesk-${localOs}`,
-            initialMaxWidth: maxWidth,
-            initialQuality: quality,
-          },
-        });
+        const params = {
+          directAddr: useRelay ? null : targetStr,
+          relayAddr: useRelay ? relayAddr : null,
+          deviceId: useRelay ? targetStr : null,
+          token: $('connToken').value,
+          clientName: `CopyToDesk-${localOs}`,
+          initialMaxWidth: maxWidth,
+          initialQuality: quality,
+        };
+        const info = await invoke('connect_remote', { params });
+        lastConnectParams = params;
+        applyConnectedInfo(info);
+        recordSavedDevice(connMode, targetStr, $('connToken').value, remoteOs);
         const ack = info.ack;
-        origW = ack.width;
-        origH = ack.height;
-        streamW = ack.width;
-        streamH = ack.height;
-        remoteOs = (ack.codecProbe && ack.codecProbe.os) ? String(ack.codecProbe.os) : '';
-
-        populateMonitorSelect(ack.monitors || [], ack.activeMonitor || 0);
-
-        ctrlCmdMapEnabled = Boolean(remoteOs && ((localOs === 'macos') !== (remoteOs === 'macos')));
-        updateKeyMapBtn();
-
-        $('e2eeBadge').style.display = info.encrypted ? 'inline-block' : 'none';
-        const rb = $('routeBadge');
-        rb.style.display = 'inline-block';
-        if (info.route === 'lan-p2p') {
-          rb.textContent = `⚡ 局域网直连 (${info.endpoint})`;
-          rb.style.color = '#86efac';
-        } else if (info.route === 'relay') {
-          rb.textContent = '🌐 公网中继穿透';
-          rb.style.color = '#93c5fd';
-        } else {
-          rb.textContent = `⚡ 直连 (${info.endpoint})`;
-          rb.style.color = '#86efac';
-        }
         log(`E2EE 连接成功 [${info.route} -> ${info.endpoint}]: 远端=${remoteOs || 'unknown'} ${ack.captureBackend} ${ack.width}x${ack.height} (${(ack.monitors || []).length}屏)`);
         toast(info.route === 'lan-p2p' ? `🔒 E2EE 局域网直连 (${info.endpoint})` : `🔒 E2EE 已连接 (${ack.inputBackend})`, 'ok');
       } else {
+        recordSavedDevice(connMode, targetStr, $('connToken').value, 'web');
         toast('已建立 Web 远程连接', 'ok');
       }
       connected = true;
@@ -714,6 +976,10 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   $('btnDisconnect').addEventListener('click', () => {
+    reconnecting = false;
+    reconnToken++;
+    lastConnectParams = null;
+    $('reconnBanner').style.display = 'none';
     releaseAllRemoteModifiers();
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
@@ -762,6 +1028,27 @@ window.addEventListener('DOMContentLoaded', () => {
     const isFs = Boolean(document.fullscreenElement);
     $('btnFullscreen').classList.toggle('active', isFs);
     $('btnFullscreen').textContent = isFs ? '⛶ 退出全屏' : '⛶ 全屏';
+    $('viewerBar').classList.remove('fs-open');
+  });
+
+  $('fsHoverTab').addEventListener('mouseenter', () => {
+    $('viewerBar').classList.add('fs-open');
+  });
+  $('tab-viewer').addEventListener('mousemove', (ev) => {
+    if (!document.fullscreenElement) return;
+    if (ev.clientY <= 8) {
+      $('viewerBar').classList.add('fs-open');
+    } else if (ev.clientY > 64 && !$('viewerBar').matches(':hover') && !$('viewerBar').matches(':focus-within')) {
+      $('viewerBar').classList.remove('fs-open');
+    }
+  });
+
+  $('btnScrollDir').addEventListener('click', () => {
+    invertScroll = !invertScroll;
+    updateScrollDirBtn();
+    saveSettings();
+    toast(invertScroll ? '已切换为反向滚动（macOS 自然滚动风格）' : '已切换为正向滚动');
+    cvs.focus();
   });
 
   $('comboSelect').addEventListener('change', async () => {
@@ -876,18 +1163,53 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!connected || !isTauri) return;
     ev.preventDefault();
     const { nx, ny } = mapNormXY(ev);
-    const delta = ev.deltaY < 0 ? 120 : -120;
+    let rawDy = ev.deltaY;
+    if (ev.deltaMode === 1) rawDy *= 40;
+    else if (ev.deltaMode === 2) rawDy *= 360;
+    if (rawDy === 0) return;
+    let delta = Math.round((invertScroll ? rawDy : -rawDy) * 1.2);
+    if (delta === 0) delta = (invertScroll ? rawDy : -rawDy) > 0 ? 15 : -15;
+    delta = Math.max(-600, Math.min(600, delta));
     sendMouseNorm(3, 0, nx, ny, delta);
   }, { passive: false });
 
-  // ---- Smart Cross-OS Keyboard + Seamless Clipboard Sync ----
+  // ---- Full Developer Cross-OS Keyboard + Seamless Clipboard Sync ----
   const SPECIAL_VK = {
-    Backspace: 0x08, Tab: 0x09, Enter: 0x0d, Escape: 0x1b, ' ': 0x20,
+    Backspace: 0x08, Tab: 0x09, Enter: 0x0d, CapsLock: 0x14, Escape: 0x1b, ' ': 0x20,
+    PageUp: 0x21, PageDown: 0x22, End: 0x23, Home: 0x24,
     ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
-    Delete: 0x2e, Shift: 0x10, Control: 0x11, Alt: 0x12, Meta: 0x5b,
-    '-': 0xbd, '=': 0xbb,
-    F1: 0x70, F2: 0x71, F3: 0x72, F4: 0x73, F5: 0x74, F11: 0x7a,
+    Insert: 0x2d, Delete: 0x2e, Shift: 0x10, Control: 0x11, Alt: 0x12, Meta: 0x5b,
+    F1: 0x70, F2: 0x71, F3: 0x72, F4: 0x73, F5: 0x74, F6: 0x75,
+    F7: 0x76, F8: 0x77, F9: 0x78, F10: 0x79, F11: 0x7a, F12: 0x7b,
   };
+
+  const CODE_TO_OEM_VK = {
+    Semicolon: 0xba,
+    Equal: 0xbb,
+    Comma: 0xbc,
+    Minus: 0xbd,
+    Period: 0xbe,
+    Slash: 0xbf,
+    Backquote: 0xc0,
+    BracketLeft: 0xdb,
+    Backslash: 0xdc,
+    BracketRight: 0xdd,
+    Quote: 0xde,
+  };
+
+  function resolveShortcutVk(ev) {
+    if (CODE_TO_OEM_VK[ev.code]) return CODE_TO_OEM_VK[ev.code];
+    if (ev.code && ev.code.startsWith('Key') && ev.code.length === 4) {
+      return ev.code.charCodeAt(3); // 'A'..'Z' (0x41..0x5A)
+    }
+    if (ev.code && ev.code.startsWith('Digit') && ev.code.length === 6) {
+      return ev.code.charCodeAt(5); // '0'..'9' (0x30..0x39)
+    }
+    if (ev.key && ev.key.length === 1) {
+      return ev.key.toUpperCase().charCodeAt(0);
+    }
+    return 0;
+  }
 
   function computeRemoteModifiers(ev) {
     let ctrl = ev.ctrlKey;
@@ -939,9 +1261,9 @@ window.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    if (ev.key.length === 1) {
-      const upper = ev.key.toUpperCase();
-      const code = upper.charCodeAt(0);
+    const vkCode = resolveShortcutVk(ev);
+    if (vkCode) {
+      const upper = ev.key.length === 1 ? ev.key.toUpperCase() : '';
       const isPrimaryShortcut = (remoteOs === 'macos') ? meta : ctrl;
 
       if (isPrimaryShortcut && upper === 'V' && !ev.repeat) {
@@ -955,7 +1277,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
       }
 
-      invoke('remote_key_event', { action: 0, vk: code, flags, unicodeChar: 0 }).catch(() => {});
+      invoke('remote_key_event', { action: 0, vk: vkCode, flags, unicodeChar: 0 }).catch(() => {});
 
       if (isPrimaryShortcut && (upper === 'C' || upper === 'X') && !ev.repeat) {
         setTimeout(async () => {
@@ -990,9 +1312,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
     if (SPECIAL_VK[ev.key]) {
       invoke('remote_key_event', { action: 1, vk: SPECIAL_VK[ev.key], flags, unicodeChar: 0 }).catch(() => {});
-    } else if (ev.key.length === 1) {
-      const code = ev.key.toUpperCase().charCodeAt(0);
-      invoke('remote_key_event', { action: 1, vk: code, flags, unicodeChar: 0 }).catch(() => {});
+    } else {
+      const vkCode = resolveShortcutVk(ev);
+      if (vkCode) {
+        invoke('remote_key_event', { action: 1, vk: vkCode, flags, unicodeChar: 0 }).catch(() => {});
+      }
     }
   });
 
@@ -1382,6 +1706,8 @@ window.addEventListener('DOMContentLoaded', () => {
     loadSettings();
     applyConnMode(connMode);
     updateKeyMapBtn();
+    updateScrollDirBtn();
+    renderSavedBook();
     $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
     $('hostAddrHint').textContent = `局域网直连监听：${$('hostBind').value.trim() || '0.0.0.0:19800'}`;
 
@@ -1400,6 +1726,9 @@ window.addEventListener('DOMContentLoaded', () => {
           lastRttMs = Number(event.payload) || 0;
           updateHud();
         });
+        listen('remote-disconnected', (event) => {
+          handleUnexpectedDisconnect(event.payload);
+        });
         listen('file-transfer-progress', (event) => {
           const p = event.payload || {};
           if (p.direction === 'download') {
@@ -1414,7 +1743,11 @@ window.addEventListener('DOMContentLoaded', () => {
         $('modeSubtitle').textContent = `Tauri 2 · ${info.os}/${info.arch}`;
         $('engineDot').className = 'dot ok';
         $('engineText').textContent = `原生引擎就绪 v${info.version}`;
-        log(`Tauri 2 多屏+光标同步引擎就绪 (${info.os}/${info.arch} v${info.version})`);
+        log(`Tauri 2 引擎就绪 (${info.os}/${info.arch} v${info.version})`);
+        if ($('hostAutoStart').checked && !hostRunning) {
+          log('检测到已勾选「启动时自动开启被控服务」，正在自动启动...');
+          $('btnStartHost').click();
+        }
       } catch (e) {
         $('engineDot').className = 'dot warn';
         $('engineText').textContent = 'IPC 通信异常';

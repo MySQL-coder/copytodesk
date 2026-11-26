@@ -459,13 +459,21 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && req.url === '/api/devices') {
+      const adminKey = (process.env.CTD_ADMIN_KEY || '').trim();
+      const allowPublic = process.argv.includes('--allow-public-list');
+      const reqKey = String(req.headers['x-admin-key'] || '').trim();
+      if (!allowPublic && (!adminKey || reqKey !== adminKey)) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ devices: [], privacyProtected: true, onlineCount: hosts.size }));
+        return;
+      }
       const devices = Array.from(hosts.values()).map((h) => ({
         deviceId: h.deviceId,
         name: h.name,
         registeredAt: h.registeredAt,
       }));
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ devices }));
+      res.end(JSON.stringify({ devices, privacyProtected: false }));
       return;
     }
     if (req.method === 'GET' && req.url === '/api/health') {

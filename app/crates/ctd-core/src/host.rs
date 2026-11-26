@@ -7,7 +7,7 @@
 
 use crate::capture::{create_capturer, now_us};
 use crate::clipboard;
-use crate::codec::{encode_full_screenshot, CompoundTileEncoder};
+use crate::codec::{downsample_rgba_crisp, encode_full_screenshot, CompoundTileEncoder};
 use crate::cursor;
 use crate::input::{create_injector, InputInjector};
 use ctd_protocol::{
@@ -16,7 +16,6 @@ use ctd_protocol::{
     MonitorInfo, MonitorSelectAckPayload, MouseEventPacket, MsgType, SendCipher,
     ServerE2eeHandshake, UploadChunkMeta, FILE_CHUNK_SIZE,
 };
-use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -307,6 +306,7 @@ impl HostHandle {
             let mut cur_q = 0u8;
             let mut encoder = CompoundTileEncoder::new(cur_w, cur_h, 128, 72, 3);
             let mut raw_buf = vec![0u8; (cur_w * cur_h * 4) as usize];
+            let mut scaled_buf: Vec<u8> = Vec::new();
             let mut last_cursor: Option<CursorStatePacket> = None;
 
             while cap_state.running.load(Ordering::Relaxed) {
@@ -375,25 +375,16 @@ impl HostHandle {
                             force_kf = true;
                         }
 
-                        let scaled_cow: std::borrow::Cow<'_, [u8]> =
-                            if sw == cur_w && sh == cur_h {
-                                std::borrow::Cow::Borrowed(&raw_buf)
-                            } else if let Some(img) =
-                                RgbaImage::from_raw(cur_w, cur_h, raw_buf.clone())
-                            {
-                                let r = image::imageops::resize(
-                                    &img,
-                                    sw,
-                                    sh,
-                                    image::imageops::FilterType::Nearest,
-                                );
-                                std::borrow::Cow::Owned(r.into_raw())
-                            } else {
-                                std::borrow::Cow::Borrowed(&raw_buf)
-                            };
+                        let encode_slice: &[u8] = if sw == cur_w && sh == cur_h {
+                            &raw_buf
+                        } else {
+                            downsample_rgba_crisp(&raw_buf, cur_w, cur_h, sw, sh, &mut scaled_buf);
+                            &scaled_buf
+                        };
 
-                        if scaled_cow.len() == (sw * sh * 4) as usize {
-                            let (pkt, flags) = encoder.encode_rgba(&scaled_cow, now_us(), force_kf);
+                        if encode_slice.len() == (sw * sh * 4) as usize {
+                            let (pkt, flags) =
+                                encoder.encode_rgba(encode_slice, now_us(), force_kf);
                             if !pkt.tiles.is_empty() {
                                 let _ = cap_state.frame_tx.send((flags, pkt.serialize()));
                             }

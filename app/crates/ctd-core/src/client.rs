@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
@@ -107,6 +107,7 @@ pub struct RemoteClient {
     upload_hashers: Mutex<HashMap<String, Sha256>>,
     remote_w: AtomicU16,
     remote_h: AtomicU16,
+    manual_disconnect: Arc<AtomicBool>,
     cancel: Arc<Notify>,
     pub info: ConnectInfo,
 }
@@ -171,16 +172,18 @@ async fn perform_e2ee_hello(
 }
 
 impl RemoteClient {
-    pub async fn connect_streaming<F, C, R>(
+    pub async fn connect_streaming<F, C, R, D>(
         params: &ConnectParams,
         on_frame: F,
         on_cursor: C,
         on_rtt: R,
+        on_disconnect: D,
     ) -> Result<Self, String>
     where
         F: Fn(TilePushEvent) + Send + Sync + 'static,
         C: Fn(CursorPushEvent) + Send + Sync + 'static,
         R: Fn(f64) + Send + Sync + 'static,
+        D: Fn(String) + Send + Sync + 'static,
     {
         let cname = params
             .client_name
@@ -244,6 +247,7 @@ impl RemoteClient {
         let (mut rd, mut wr) = stream.into_split();
         let (tx, mut rx) = mpsc::unbounded_channel::<(MsgType, ChannelId, Vec<u8>)>();
         let waiters: RpcWaiters = Arc::new(Mutex::new(HashMap::new()));
+        let manual_disconnect = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(Notify::new());
 
         // 2. Dedicated Lock-Free Encrypted Writer Task
@@ -267,6 +271,7 @@ impl RemoteClient {
         // 3. Dedicated Continuous Encrypted Reader Task
         let cancel_rd = cancel.clone();
         let waiters_rd = waiters.clone();
+        let manual_disc_rd = manual_disconnect.clone();
         tokio::spawn(async move {
             loop {
                 let frame_res = tokio::select! {
@@ -338,6 +343,10 @@ impl RemoteClient {
                     }
                 }
             }
+            if !manual_disc_rd.load(Ordering::Acquire) {
+                on_disconnect("远端连接已中断".to_string());
+            }
+            cancel_rd.notify_waiters();
         });
 
         // 4. Periodic 2s Ping Task
@@ -364,6 +373,7 @@ impl RemoteClient {
             upload_hashers: Mutex::new(HashMap::new()),
             remote_w: AtomicU16::new(init_w),
             remote_h: AtomicU16::new(init_h),
+            manual_disconnect,
             cancel,
             info,
         };
@@ -374,6 +384,7 @@ impl RemoteClient {
     }
 
     pub fn disconnect(&self) {
+        self.manual_disconnect.store(true, Ordering::Release);
         self.cancel.notify_waiters();
     }
 
@@ -773,6 +784,7 @@ impl RemoteClient {
 
 impl Drop for RemoteClient {
     fn drop(&mut self) {
+        self.manual_disconnect.store(true, Ordering::Release);
         self.cancel.notify_waiters();
     }
 }
@@ -819,9 +831,11 @@ mod tests {
             initial_max_width: Some(640),
             initial_quality: Some(60),
         };
-        assert!(RemoteClient::connect_streaming(&bad_params, |_| {}, |_| {}, |_| {})
-            .await
-            .is_err());
+        assert!(
+            RemoteClient::connect_streaming(&bad_params, |_| {}, |_| {}, |_| {}, |_| {})
+                .await
+                .is_err()
+        );
 
         // 2. Unattended permanent password establishes E2EE session & lists 2 synthetic monitors
         let perm_params = ConnectParams {
@@ -829,9 +843,19 @@ mod tests {
             client_name: Some("UnattendedViewer".into()),
             ..bad_params
         };
-        let client = RemoteClient::connect_streaming(&perm_params, |_| {}, |_| {}, |_| {})
-            .await
-            .unwrap();
+        let disc_fired = Arc::new(AtomicBool::new(false));
+        let disc_flag = disc_fired.clone();
+        let client = RemoteClient::connect_streaming(
+            &perm_params,
+            |_| {},
+            |_| {},
+            |_| {},
+            move |_| {
+                disc_flag.store(true, Ordering::Release);
+            },
+        )
+        .await
+        .unwrap();
         assert!(client.info.encrypted);
         assert_eq!(client.info.ack.monitors.len(), 2);
         assert_eq!(client.info.ack.width, 1280);
@@ -864,6 +888,16 @@ mod tests {
         assert_eq!(dl_res.bytes, big_data.len() as u64);
         assert_eq!(dl_res.sha256, expected_sha);
         assert_eq!(std::fs::read(&dl_target).unwrap(), big_data);
+
+        // 5. Kicking viewers from Host triggers remote disconnect callback immediately
+        host.kick_viewers();
+        for _ in 0..20 {
+            if disc_fired.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(disc_fired.load(Ordering::Acquire));
 
         client.disconnect();
         host.stop();

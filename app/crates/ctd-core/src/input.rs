@@ -401,8 +401,13 @@ mod mac_input {
             0x08 => Some(51),        // Backspace / Delete
             0x09 => Some(48),        // Tab
             0x0D => Some(36),        // Return
+            0x14 => Some(57),        // CapsLock
             0x1B => Some(53),        // Escape
             0x20 => Some(49),        // Space
+            0x21 => Some(116),       // PageUp
+            0x22 => Some(121),       // PageDown
+            0x23 => Some(119),       // End
+            0x24 => Some(115),       // Home
             0x25 => Some(123),       // Left
             0x26 => Some(126),       // Up
             0x27 => Some(124),       // Right
@@ -448,14 +453,29 @@ mod mac_input {
             0x37 => Some(26),        // 7
             0x38 => Some(28),        // 8
             0x39 => Some(25),        // 9
-            0xBD => Some(27),        // -
+            0xBA => Some(41),        // ;
             0xBB => Some(24),        // =
+            0xBC => Some(43),        // ,
+            0xBD => Some(27),        // -
+            0xBE => Some(47),        // .
+            0xBF => Some(44),        // /
+            0xC0 => Some(50),        // `
+            0xDB => Some(33),        // [
+            0xDC => Some(42),        // \
+            0xDD => Some(30),        // ]
+            0xDE => Some(39),        // '
             0x70 => Some(122),       // F1
             0x71 => Some(120),       // F2
             0x72 => Some(99),        // F3 (Mission Control)
             0x73 => Some(118),       // F4
             0x74 => Some(96),        // F5
+            0x75 => Some(97),        // F6
+            0x76 => Some(98),        // F7
+            0x77 => Some(100),       // F8
+            0x78 => Some(101),       // F9
+            0x79 => Some(109),       // F10
             0x7A => Some(103),       // F11 (Show Desktop)
+            0x7B => Some(111),       // F12
             _ => None,
         }
     }
@@ -478,17 +498,14 @@ mod mac_input {
             let pt = self.to_point(ev.norm_x, ev.norm_y);
             unsafe {
                 if ev.action == 3 {
-                    let lines = (ev.wheel_delta as i32) / 40;
-                    let delta = if lines == 0 {
-                        if ev.wheel_delta > 0 {
-                            1
-                        } else {
-                            -1
-                        }
+                    // Smooth pixel-unit scrolling (`units = 0` = kCGScrollEventUnitPixel)
+                    let px_delta = ((ev.wheel_delta as i32) / 3).clamp(-240, 240);
+                    let delta = if px_delta == 0 {
+                        if ev.wheel_delta > 0 { 4 } else { -4 }
                     } else {
-                        lines
+                        px_delta
                     };
-                    let e = CGEventCreateScrollWheelEvent(std::ptr::null(), 1, 1, delta);
+                    let e = CGEventCreateScrollWheelEvent(std::ptr::null(), 0, 1, delta);
                     if !e.is_null() {
                         CGEventPost(K_CG_HID_EVENT_TAP, e);
                         CFRelease(e);
@@ -666,12 +683,18 @@ mod linux_input {
             0x08 => Some(0xff08), // BackSpace
             0x09 => Some(0xff09), // Tab
             0x0D => Some(0xff0d), // Return
+            0x14 => Some(0xffe5), // Caps_Lock
             0x1B => Some(0xff1b), // Escape
             0x20 => Some(0x0020), // space
+            0x21 => Some(0xff55), // Page_Up
+            0x22 => Some(0xff56), // Page_Down
+            0x23 => Some(0xff57), // End
+            0x24 => Some(0xff50), // Home
             0x25 => Some(0xff51), // Left
             0x26 => Some(0xff52), // Up
             0x27 => Some(0xff53), // Right
             0x28 => Some(0xff54), // Down
+            0x2D => Some(0xff63), // Insert
             0x2E => Some(0xffff), // Delete
             0x10 => Some(0xffe1), // Shift_L
             0x11 => Some(0xffe3), // Control_L
@@ -680,6 +703,17 @@ mod linux_input {
             0x30..=0x39 => Some(vk as c_ulong),
             0x41..=0x5A => Some((vk as c_ulong) + 32), // lowercase ASCII keysym
             0x70..=0x7B => Some(0xffbe + ((vk - 0x70) as c_ulong)), // F1..F12
+            0xBA => Some(0x003b), // ;
+            0xBB => Some(0x003d), // =
+            0xBC => Some(0x002c), // ,
+            0xBD => Some(0x002d), // -
+            0xBE => Some(0x002e), // .
+            0xBF => Some(0x002f), // /
+            0xC0 => Some(0x0060), // `
+            0xDB => Some(0x005b), // [
+            0xDC => Some(0x005c), // \
+            0xDD => Some(0x005d), // ]
+            0xDE => Some(0x0027), // '
             _ => None,
         }
     }
