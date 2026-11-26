@@ -10,6 +10,7 @@ use crate::clipboard;
 use crate::codec::{downsample_rgba_crisp, encode_full_screenshot, CompoundTileEncoder};
 use crate::cursor;
 use crate::input::{create_injector, InputInjector};
+use crate::power::{set_thread_prevent_sleep, SleepInhibitor};
 use ctd_protocol::{
     read_frame, read_frame_opt_cipher, write_frame, write_frame_opt_cipher, ChannelId,
     CursorStatePacket, DownloadChunkReq, FileActionPayload, HelloAckPayload, HelloPayload,
@@ -29,6 +30,46 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use tokio::time::{sleep, Duration, Instant};
+
+fn default_true() -> bool {
+    true
+}
+
+pub fn default_shared_files_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.trim().is_empty() {
+                let d = PathBuf::from(profile)
+                    .join("Downloads")
+                    .join("CopyToDesk-Shared");
+                if std::fs::create_dir_all(&d).is_ok() {
+                    return d;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.trim().is_empty() {
+                let d = PathBuf::from(&home)
+                    .join("Downloads")
+                    .join("CopyToDesk-Shared");
+                if std::fs::create_dir_all(&d).is_ok() {
+                    return d;
+                }
+                let fallback_home = PathBuf::from(home).join("CopyToDesk-Shared");
+                if std::fs::create_dir_all(&fallback_home).is_ok() {
+                    return fallback_home;
+                }
+            }
+        }
+    }
+    let tmp = std::env::temp_dir().join("CopyToDesk").join("shared-files");
+    let _ = std::fs::create_dir_all(&tmp);
+    tmp
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +91,10 @@ pub struct HostConfig {
     pub allow_input: bool,
     pub allow_exec: bool,
     pub exec_allowlist: Vec<String>,
+    #[serde(default = "default_true")]
+    pub prevent_sleep: bool,
+    #[serde(default = "default_true")]
+    pub auto_clipboard_sync: bool,
 }
 
 impl Default for HostConfig {
@@ -69,6 +114,8 @@ impl Default for HostConfig {
             allow_input: true,
             allow_exec: false,
             exec_allowlist: vec!["echo".into(), "hostname".into(), "whoami".into()],
+            prevent_sleep: true,
+            auto_clipboard_sync: true,
         }
     }
 }
@@ -89,6 +136,8 @@ pub struct HostStatus {
     pub active_monitor: u16,
     pub active_sessions: Vec<String>,
     pub exec_enabled: bool,
+    pub file_root: String,
+    pub prevent_sleep: bool,
 }
 
 /// Sliding-window brute-force rate limiter (max 5 failed attempts in 60s -> 15s cooldown).
@@ -187,9 +236,12 @@ struct SharedState {
     latest_rgba: RwLock<Vec<u8>>,
     clipboard: RwLock<String>,
     clipboard_png: RwLock<Vec<u8>>,
+    last_clip_hash: std::sync::Mutex<(bool, [u8; 32])>,
+    sleep_guard: std::sync::Mutex<Option<SleepInhibitor>>,
     injector: Arc<dyn InputInjector>,
     frame_tx: broadcast::Sender<(u8, Vec<u8>)>,
     cursor_tx: broadcast::Sender<[u8; 6]>,
+    clipboard_tx: broadcast::Sender<Vec<u8>>,
     force_keyframe: AtomicBool,
     stream_max_w: AtomicU32,
     stream_quality: AtomicU8,
@@ -236,7 +288,7 @@ fn discover_lan_endpoints(bind_addr: &str) -> Vec<String> {
 impl HostHandle {
     pub async fn start(mut cfg: HostConfig) -> Result<Self, String> {
         if cfg.file_root.as_os_str().is_empty() || cfg.file_root.is_relative() {
-            cfg.file_root = std::env::temp_dir().join("CopyToDesk").join("shared-files");
+            cfg.file_root = default_shared_files_dir();
         }
         std::fs::create_dir_all(&cfg.file_root)
             .map_err(|e| format!("create file_root {:?}: {}", cfg.file_root, e))?;
@@ -263,6 +315,8 @@ impl HostHandle {
 
         let (frame_tx, _) = broadcast::channel(3);
         let (cursor_tx, _) = broadcast::channel(16);
+        let (clipboard_tx, _) = broadcast::channel(8);
+        let sleep_inhibitor = SleepInhibitor::acquire(cfg.prevent_sleep && !cfg.force_synthetic);
 
         let initial_relay_status = if cfg.relay_addr.as_deref().unwrap_or("").is_empty() {
             "disabled".to_string()
@@ -287,9 +341,12 @@ impl HostHandle {
             latest_rgba: RwLock::new(vec![0u8; (init_w * init_h * 4) as usize]),
             clipboard: RwLock::new(String::new()),
             clipboard_png: RwLock::new(Vec::new()),
+            last_clip_hash: std::sync::Mutex::new((false, [0u8; 32])),
+            sleep_guard: std::sync::Mutex::new(Some(sleep_inhibitor)),
             injector,
             frame_tx,
             cursor_tx,
+            clipboard_tx,
             force_keyframe: AtomicBool::new(true),
             running: AtomicBool::new(true),
             cap_thread: std::sync::OnceLock::new(),
@@ -300,6 +357,10 @@ impl HostHandle {
         // 1. Capture + Multi-Monitor Switch + Cursor Delta + Incremental Tile Encode loop
         let cap_state = state.clone();
         let cap_join = std::thread::spawn(move || {
+            let keep_awake = cap_state.cfg.prevent_sleep && !cap_state.cfg.force_synthetic;
+            if keep_awake {
+                set_thread_prevent_sleep(true);
+            }
             let interval = Duration::from_millis((1000 / cap_state.cfg.fps.max(1)).max(15) as u64);
             let mut cur_w = init_w;
             let mut cur_h = init_h;
@@ -404,8 +465,61 @@ impl HostHandle {
                     std::thread::park_timeout(target_wait - elapsed);
                 }
             }
+            if keep_awake {
+                set_thread_prevent_sleep(false);
+            }
         });
         let _ = state.cap_thread.set(cap_join.thread().clone());
+
+        // 1b. Passive OS Clipboard Delta Watcher (only polls while >=1 viewer is connected)
+        if cfg.auto_clipboard_sync && !cfg.force_synthetic {
+            let clip_state = state.clone();
+            tokio::spawn(async move {
+                let mut iv = tokio::time::interval(Duration::from_millis(900));
+                loop {
+                    tokio::select! {
+                        _ = clip_state.stop_notify.notified() => break,
+                        _ = iv.tick() => {
+                            if !clip_state.running.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let has_viewers = clip_state.clipboard_tx.receiver_count() > 0;
+                            if !has_viewers {
+                                if let Ok(mut g) = clip_state.last_clip_hash.lock() {
+                                    g.0 = false;
+                                }
+                                continue;
+                            }
+                            let Ok(txt) = tokio::task::spawn_blocking(clipboard::get_text).await else {
+                                continue;
+                            };
+                            if txt.is_empty() || txt.len() > 256 * 1024 {
+                                continue;
+                            }
+                            let digest: [u8; 32] = Sha256::digest(txt.as_bytes()).into();
+                            let should_push = if let Ok(mut g) = clip_state.last_clip_hash.lock() {
+                                if !g.0 {
+                                    // Seed baseline on new viewer session without clobbering viewer's local clipboard
+                                    *g = (true, digest);
+                                    false
+                                } else if g.1 != digest {
+                                    g.1 = digest;
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if should_push {
+                                *clip_state.clipboard.write().await = txt.clone();
+                                let _ = clip_state.clipboard_tx.send(txt.into_bytes());
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // 2. Direct TCP accept loop
         let srv_state = state.clone();
@@ -470,6 +584,18 @@ impl HostHandle {
             active_monitor: self.state.active_monitor.load(Ordering::Relaxed),
             active_sessions,
             exec_enabled: self.state.cfg.allow_exec,
+            file_root: self.state.cfg.file_root.to_string_lossy().to_string(),
+            prevent_sleep: self.state.cfg.prevent_sleep,
+        }
+    }
+
+    pub fn push_clipboard_text(&self, text: &str) {
+        if !text.is_empty() {
+            let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+            if let Ok(mut g) = self.state.last_clip_hash.lock() {
+                *g = (true, digest);
+            }
+            let _ = self.state.clipboard_tx.send(text.as_bytes().to_vec());
         }
     }
 
@@ -479,6 +605,9 @@ impl HostHandle {
 
     pub fn stop(&self) {
         self.state.running.store(false, Ordering::Release);
+        if let Ok(mut g) = self.state.sleep_guard.lock() {
+            let _ = g.take();
+        }
         self.state.wake_capturer();
         self.state.kick_notify.notify_waiters();
         self.state.stop_notify.notify_waiters();
@@ -719,6 +848,11 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
 
     let mut rx_vid = state.frame_tx.subscribe();
     let mut rx_cur = state.cursor_tx.subscribe();
+    let mut rx_clip_opt = if hello.supports_clip_push {
+        Some(state.clipboard_tx.subscribe())
+    } else {
+        None
+    };
     state.force_keyframe.store(true, Ordering::Release);
     state.wake_capturer();
 
@@ -729,6 +863,18 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
             tokio::select! {
                 _ = st_push.stop_notify.notified() => break,
                 _ = st_push.kick_notify.notified() => break,
+                clip_res = async {
+                    match rx_clip_opt.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Ok(clip_bytes) = clip_res {
+                        if send_locked(&wr_push, MsgType::ClipboardPush, ChannelId::Control, 0, &clip_bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                }
                 cur_res = rx_cur.recv() => {
                     if let Ok(cur_bytes) = cur_res {
                         if send_locked(&wr_push, MsgType::CursorState, ChannelId::Cursor, 0, &cur_bytes).await.is_err() {
@@ -883,6 +1029,12 @@ async fn handle_client(state: Arc<SharedState>, stream: TcpStream) {
             }
             MsgType::ClipboardData => {
                 let txt = String::from_utf8_lossy(&payload).to_string();
+                if !txt.is_empty() {
+                    let digest: [u8; 32] = Sha256::digest(txt.as_bytes()).into();
+                    if let Ok(mut g) = state.last_clip_hash.lock() {
+                        *g = (true, digest);
+                    }
+                }
                 *state.clipboard.write().await = txt.clone();
                 let txt_os = txt.clone();
                 let _ = tokio::task::spawn_blocking(move || clipboard::set_text(&txt_os)).await;

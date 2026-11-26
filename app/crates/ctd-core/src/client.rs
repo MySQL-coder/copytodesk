@@ -143,6 +143,7 @@ async fn perform_e2ee_hello(
     let hello = HelloPayload {
         client_name: client_name.to_string(),
         token: token.to_string(),
+        supports_clip_push: true,
     };
     let hello_bytes = serde_json::to_vec(&hello).map_err(|e| e.to_string())?;
     write_frame_opt_cipher(
@@ -173,17 +174,59 @@ async fn perform_e2ee_hello(
 }
 
 impl RemoteClient {
-    pub async fn connect_streaming<F, C, R, D>(
+    /// Fallback decoder for non-binary IPC environments: converts `[flags_u8, VideoTileFramePacket...]` into `TilePushEvent`.
+    pub fn decode_raw_frame_to_event(raw: &[u8]) -> Option<TilePushEvent> {
+        if raw.len() < 25 {
+            return None;
+        }
+        let hdr_flags = raw[0];
+        let payload = &raw[1..];
+        let byte_len = payload.len() as u32;
+        let pkt = VideoTileFramePacket::deserialize(payload).ok()?;
+        let tiles = pkt
+            .tiles
+            .into_iter()
+            .map(|t| {
+                let (mime, is_lossless) = match t.encoding {
+                    TileEncoding::PngLossless => ("image/png".to_string(), true),
+                    _ => ("image/jpeg".to_string(), false),
+                };
+                TileItem {
+                    x: t.x,
+                    y: t.y,
+                    w: t.w,
+                    h: t.h,
+                    mime,
+                    is_lossless,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&t.data),
+                }
+            })
+            .collect();
+        Some(TilePushEvent {
+            frame_id: pkt.frame_id,
+            screen_w: pkt.screen_w,
+            screen_h: pkt.screen_h,
+            encode_us: pkt.encode_us,
+            byte_len,
+            is_key_frame: (hdr_flags & frame_flags::KEY_FRAME) != 0,
+            has_lossless: (hdr_flags & frame_flags::LOSSLESS_REFINEMENT) != 0,
+            tiles,
+        })
+    }
+
+    pub async fn connect_streaming<F, C, R, P, D>(
         params: &ConnectParams,
-        on_frame: F,
+        on_raw_frame: F,
         on_cursor: C,
         on_rtt: R,
+        on_clipboard: P,
         on_disconnect: D,
     ) -> Result<Self, String>
     where
-        F: Fn(TilePushEvent) + Send + Sync + 'static,
+        F: Fn(Vec<u8>) + Send + Sync + 'static,
         C: Fn(CursorPushEvent) + Send + Sync + 'static,
         R: Fn(f64) + Send + Sync + 'static,
+        P: Fn(String) + Send + Sync + 'static,
         D: Fn(String) + Send + Sync + 'static,
     {
         let cname = params
@@ -283,38 +326,11 @@ impl RemoteClient {
 
                 match hdr.msg_type {
                     MsgType::VideoTileFrame => {
-                        let byte_len = payload.len() as u32;
-                        if let Ok(pkt) = VideoTileFramePacket::deserialize(&payload) {
-                            let tiles = pkt
-                                .tiles
-                                .into_iter()
-                                .map(|t| {
-                                    let (mime, is_lossless) = match t.encoding {
-                                        TileEncoding::PngLossless => ("image/png".to_string(), true),
-                                        _ => ("image/jpeg".to_string(), false),
-                                    };
-                                    TileItem {
-                                        x: t.x,
-                                        y: t.y,
-                                        w: t.w,
-                                        h: t.h,
-                                        mime,
-                                        is_lossless,
-                                        data_base64: base64::engine::general_purpose::STANDARD
-                                            .encode(&t.data),
-                                    }
-                                })
-                                .collect();
-                            on_frame(TilePushEvent {
-                                frame_id: pkt.frame_id,
-                                screen_w: pkt.screen_w,
-                                screen_h: pkt.screen_h,
-                                encode_us: pkt.encode_us,
-                                byte_len,
-                                is_key_frame: (hdr.flags & frame_flags::KEY_FRAME) != 0,
-                                has_lossless: (hdr.flags & frame_flags::LOSSLESS_REFINEMENT) != 0,
-                                tiles,
-                            });
+                        if payload.len() >= 24 {
+                            let mut raw = Vec::with_capacity(1 + payload.len());
+                            raw.push(hdr.flags);
+                            raw.extend_from_slice(&payload);
+                            on_raw_frame(raw);
                         }
                     }
                     MsgType::CursorState => {
@@ -325,6 +341,12 @@ impl RemoteClient {
                                 shape: cur.shape,
                                 visible: cur.visible != 0,
                             });
+                        }
+                    }
+                    MsgType::ClipboardPush => {
+                        let txt = String::from_utf8_lossy(&payload).to_string();
+                        if !txt.is_empty() {
+                            on_clipboard(txt);
                         }
                     }
                     MsgType::Pong if payload.len() >= 8 => {
@@ -889,6 +911,8 @@ mod tests {
             allow_input: false,
             allow_exec: true,
             exec_allowlist: vec!["echo".into()],
+            prevent_sleep: false,
+            auto_clipboard_sync: false,
         };
         let host = HostHandle::start(cfg).await.unwrap();
         let addr = host.status().bind_addr;
@@ -904,7 +928,7 @@ mod tests {
             initial_quality: Some(60),
         };
         assert!(
-            RemoteClient::connect_streaming(&bad_params, |_| {}, |_| {}, |_| {}, |_| {})
+            RemoteClient::connect_streaming(&bad_params, |_| {}, |_| {}, |_| {}, |_| {}, |_| {})
                 .await
                 .is_err()
         );
@@ -917,11 +941,24 @@ mod tests {
         };
         let disc_fired = Arc::new(AtomicBool::new(false));
         let disc_flag = disc_fired.clone();
+        let clip_pushed = Arc::new(Mutex::new(String::new()));
+        let clip_pushed_cb = clip_pushed.clone();
+        let got_raw_frame = Arc::new(AtomicBool::new(false));
+        let got_raw_cb = got_raw_frame.clone();
         let client = RemoteClient::connect_streaming(
             &perm_params,
+            move |raw| {
+                if RemoteClient::decode_raw_frame_to_event(&raw).is_some() {
+                    got_raw_cb.store(true, Ordering::Release);
+                }
+            },
             |_| {},
             |_| {},
-            |_| {},
+            move |txt| {
+                if let Ok(mut g) = clip_pushed_cb.try_lock() {
+                    *g = txt;
+                }
+            },
             move |_| {
                 disc_flag.store(true, Ordering::Release);
             },
@@ -982,6 +1019,19 @@ mod tests {
         assert_eq!(ack_len, mini_png.len() as u32);
         let got_b64 = client.clipboard_get_image_base64().await.unwrap();
         assert!(!got_b64.is_empty());
+
+        // 5b. Passive ClipboardPush delta delivery + binary frame verification
+        host.push_clipboard_text("auto-copied-on-remote-v080");
+        for _ in 0..25 {
+            if clip_pushed.lock().await.as_str() == "auto-copied-on-remote-v080"
+                && got_raw_frame.load(Ordering::Acquire)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        assert_eq!(clip_pushed.lock().await.as_str(), "auto-copied-on-remote-v080");
+        assert!(got_raw_frame.load(Ordering::Acquire));
 
         // 6. Kicking viewers from Host triggers remote disconnect callback immediately
         host.kick_viewers();

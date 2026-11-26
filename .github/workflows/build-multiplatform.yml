@@ -3,6 +3,10 @@ name: Build Multi-Platform App Bundles
 permissions:
   contents: write
 
+concurrency:
+  group: ctd-ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
 on:
   push:
     branches:
@@ -15,16 +19,35 @@ jobs:
   rust-unit-tests:
     name: Rust Protocol & Core Tests
     runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.check_dup.outputs.should_build }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Run ctd-protocol & ctd-core unit tests
         working-directory: app
         run: cargo test -p ctd-protocol -p ctd-core
+      - name: Check duplicate branch build when release tag points at HEAD
+        id: check_dup
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --tags --force --quiet || true
+            if git tag --points-at HEAD | grep -Eq '^v[0-9]'; then
+              echo "Release tag already points at HEAD; skipping duplicate bundle matrix on branch push."
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
   build-bundles:
     name: Package (${{ matrix.platform }})
     needs: rust-unit-tests
+    if: needs.rust-unit-tests.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:

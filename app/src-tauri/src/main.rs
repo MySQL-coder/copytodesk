@@ -2,13 +2,14 @@
 
 use base64::Engine;
 use ctd_core::client::{ConnectInfo, ConnectParams, DownloadResult, ScreenshotResult};
-use ctd_core::{clipboard, HostConfig, HostHandle, HostStatus, RemoteClient};
+use ctd_core::{clipboard, host, power, HostConfig, HostHandle, HostStatus, RemoteClient};
 use ctd_protocol::{key_mod_flags, MonitorSelectAckPayload};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{
+    ipc::{Channel, InvokeResponseBody},
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
@@ -49,13 +50,36 @@ fn default_downloads_dir() -> PathBuf {
 
 #[tauri::command]
 fn get_platform_info() -> serde_json::Value {
+    let launched_minimized = std::env::args().any(|a| a == "--minimized" || a == "--silent");
     serde_json::json!({
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "mode": "tauri-native",
         "version": env!("CARGO_PKG_VERSION"),
-        "downloadsDir": default_downloads_dir().to_string_lossy()
+        "downloadsDir": default_downloads_dir().to_string_lossy(),
+        "sharedDir": host::default_shared_files_dir().to_string_lossy(),
+        "osAutoStart": power::is_os_autostart_enabled(),
+        "launchedMinimized": launched_minimized
     })
+}
+
+#[tauri::command]
+fn get_os_autostart() -> Result<bool, String> {
+    Ok(power::is_os_autostart_enabled())
+}
+
+#[tauri::command]
+fn set_os_autostart(enabled: bool) -> Result<bool, String> {
+    power::set_os_autostart_enabled(enabled)
+}
+
+#[tauri::command]
+fn hide_to_tray(app: AppHandle) -> Result<bool, String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[tauri::command]
@@ -101,6 +125,7 @@ async fn connect_remote(
     app: AppHandle,
     state: State<'_, AppState>,
     params: ConnectParams,
+    frame_channel: Option<Channel<InvokeResponseBody>>,
 ) -> Result<ConnectInfo, String> {
     if let Some(prev) = state.client.write().await.take() {
         prev.disconnect();
@@ -108,17 +133,25 @@ async fn connect_remote(
     let app_frames = app.clone();
     let app_cursor = app.clone();
     let app_rtt = app.clone();
+    let app_clip = app.clone();
     let app_disc = app.clone();
     let client = RemoteClient::connect_streaming(
         &params,
-        move |tile_ev| {
-            let _ = app_frames.emit("remote-tile-frame", &tile_ev);
+        move |raw_frame| {
+            if let Some(ref ch) = frame_channel {
+                let _ = ch.send(InvokeResponseBody::Raw(raw_frame));
+            } else if let Some(tile_ev) = RemoteClient::decode_raw_frame_to_event(&raw_frame) {
+                let _ = app_frames.emit("remote-tile-frame", &tile_ev);
+            }
         },
         move |cur_ev| {
             let _ = app_cursor.emit("remote-cursor", &cur_ev);
         },
         move |rtt_ms| {
             let _ = app_rtt.emit("remote-rtt", rtt_ms);
+        },
+        move |clip_txt| {
+            let _ = app_clip.emit("remote-clipboard-push", clip_txt);
         },
         move |reason| {
             let _ = app_disc.emit("remote-disconnected", reason);
@@ -491,6 +524,25 @@ fn open_downloads_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_shared_dir(custom_path: String) -> Result<String, String> {
+    let trimmed = custom_path.trim();
+    let dir = if !trimmed.is_empty() && Path::new(trimmed).is_absolute() {
+        PathBuf::from(trimmed)
+    } else {
+        host::default_shared_files_dir()
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    let res = Command::new("explorer").arg(&dir).spawn();
+    #[cfg(target_os = "macos")]
+    let res = Command::new("open").arg(&dir).spawn();
+    #[cfg(target_os = "linux")]
+    let res = Command::new("xdg-open").arg(&dir).spawn();
+    res.map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 async fn remote_exec_guarded(
     state: State<'_, AppState>,
     command: String,
@@ -591,6 +643,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_platform_info,
+            get_os_autostart,
+            set_os_autostart,
+            hide_to_tray,
             set_close_to_tray,
             start_host,
             stop_host,
@@ -621,6 +676,7 @@ fn main() {
             remote_file_action,
             remote_cancel_transfer,
             open_downloads_dir,
+            open_shared_dir,
             remote_exec_guarded
         ])
         .run(tauri::generate_context!())

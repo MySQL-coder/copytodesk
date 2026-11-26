@@ -66,6 +66,7 @@ pub enum MsgType {
     ClipboardData = 0x51,
     ClipboardImageGet = 0x52,
     ClipboardImageData = 0x53,
+    ClipboardPush = 0x54,
     FileListReq = 0x60,
     FileListResp = 0x61,
     FileUploadReq = 0x62,
@@ -105,6 +106,7 @@ impl TryFrom<u8> for MsgType {
             0x51 => Ok(Self::ClipboardData),
             0x52 => Ok(Self::ClipboardImageGet),
             0x53 => Ok(Self::ClipboardImageData),
+            0x54 => Ok(Self::ClipboardPush),
             0x60 => Ok(Self::FileListReq),
             0x61 => Ok(Self::FileListResp),
             0x62 => Ok(Self::FileUploadReq),
@@ -725,6 +727,8 @@ pub struct MonitorSelectAckPayload {
 pub struct HelloPayload {
     pub client_name: String,
     pub token: String,
+    #[serde(default)]
+    pub supports_clip_push: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

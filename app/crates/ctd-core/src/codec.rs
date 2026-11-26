@@ -1,5 +1,5 @@
-//! Zero-GPU pure-CPU 128x128 dirty-tile compound encoder (v0.6.0 P3):
-//! - Zero-allocation 2x2 subpixel box/area RGBA downsampler for crisp 4K/Retina scaling
+//! Zero-GPU pure-CPU multi-core 128x128 dirty-tile compound encoder (v0.8.0 P5):
+//! - Multi-core parallel `std::thread::scope` dirty-tile hashing, JPEG/PNG encoding, and 2x2 subpixel RGBA downsampling
 //! - Pass 1 (motion): fast lossy JPEG -> Pass 2 (static >= 3 ticks): paced fast-zlib PNG refinement (max 16 tiles/frame)
 
 use ctd_protocol::{frame_flags, EncodedTile, TileEncoding, VideoTileFramePacket};
@@ -12,6 +12,22 @@ use std::io::Cursor;
 use std::time::Instant;
 
 const MAX_REFINEMENTS_PER_FRAME: usize = 16;
+
+#[derive(Clone, Copy)]
+struct TileEncodeJob {
+    tx: u32,
+    ty: u32,
+    tw: u32,
+    th: u32,
+    is_png: bool,
+}
+
+fn worker_budget() -> usize {
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .clamp(1, 8)
+}
 
 pub struct CompoundTileEncoder {
     width: u32,
@@ -67,62 +83,158 @@ impl CompoundTileEncoder {
             flags |= frame_flags::KEY_FRAME;
         }
         self.frame_id = self.frame_id.wrapping_add(1);
-        let mut tiles = Vec::new();
-        let mut refined_this_frame = 0usize;
+
+        let n = self.rows * self.cols;
         let stride = (self.width * 4) as usize;
+        let cols = self.cols;
+        let tile_size = self.tile_size;
+        let width = self.width;
+        let height = self.height;
 
-        for r in 0..self.rows {
-            let ty = (r as u32) * self.tile_size;
-            let th = self.tile_size.min(self.height - ty);
-            for c in 0..self.cols {
-                let tx = (c as u32) * self.tile_size;
-                let tw = self.tile_size.min(self.width - tx);
-                let idx = r * self.cols + c;
-                let h = fnv1a_tile(rgba, stride, tx as usize, ty as usize, tw as usize, th as usize);
-
-                if force_key || h != self.prev_hashes[idx] {
-                    self.prev_hashes[idx] = h;
-                    self.needs_refinement[idx] = true;
-                    self.static_ticks[idx] = 0;
-                    if let Ok(data) = encode_tile_jpeg(rgba, stride, tx, ty, tw, th, self.jpeg_quality) {
-                        tiles.push(EncodedTile {
-                            x: tx as u16,
-                            y: ty as u16,
-                            w: tw as u16,
-                            h: th as u16,
-                            encoding: TileEncoding::JpegLossy,
-                            flags: 0,
-                            data,
-                        });
-                    }
-                } else if self.needs_refinement[idx] {
-                    self.static_ticks[idx] = self.static_ticks[idx].saturating_add(1);
-                    if self.static_ticks[idx] >= self.refine_ticks
-                        && refined_this_frame < MAX_REFINEMENTS_PER_FRAME
-                    {
-                        self.needs_refinement[idx] = false;
-                        if let Ok(data) = encode_tile_png(rgba, stride, tx, ty, tw, th) {
-                            tiles.push(EncodedTile {
-                                x: tx as u16,
-                                y: ty as u16,
-                                w: tw as u16,
-                                h: th as u16,
-                                encoding: TileEncoding::PngLossless,
-                                flags: 1,
-                                data,
-                            });
-                            refined_this_frame += 1;
+        // Step 1: Compute per-tile FNV-1a hashes (parallel across cores on full-HD/4K grids)
+        let mut hashes = vec![0u64; n];
+        let workers = worker_budget();
+        if n >= 24 && workers > 1 {
+            let chunk_len = n.div_ceil(workers);
+            std::thread::scope(|s| {
+                for (chunk_idx, out_slice) in hashes.chunks_mut(chunk_len).enumerate() {
+                    let base_idx = chunk_idx * chunk_len;
+                    s.spawn(move || {
+                        for (local_i, slot) in out_slice.iter_mut().enumerate() {
+                            let idx = base_idx + local_i;
+                            let r = idx / cols;
+                            let c = idx % cols;
+                            let tx = (c as u32) * tile_size;
+                            let ty = (r as u32) * tile_size;
+                            let tw = tile_size.min(width - tx);
+                            let th = tile_size.min(height - ty);
+                            *slot = fnv1a_tile(
+                                rgba,
+                                stride,
+                                tx as usize,
+                                ty as usize,
+                                tw as usize,
+                                th as usize,
+                            );
                         }
-                    }
+                    });
+                }
+            });
+        } else {
+            for (idx, slot) in hashes.iter_mut().enumerate() {
+                let r = idx / cols;
+                let c = idx % cols;
+                let tx = (c as u32) * tile_size;
+                let ty = (r as u32) * tile_size;
+                let tw = tile_size.min(width - tx);
+                let th = tile_size.min(height - ty);
+                *slot = fnv1a_tile(
+                    rgba,
+                    stride,
+                    tx as usize,
+                    ty as usize,
+                    tw as usize,
+                    th as usize,
+                );
+            }
+        }
+
+        // Step 2: Deterministic row-major dirty & lossless-refinement state update
+        let mut jobs = Vec::new();
+        let mut refined_this_frame = 0usize;
+        for (idx, &h) in hashes.iter().enumerate() {
+            let r = idx / cols;
+            let c = idx % cols;
+            let tx = (c as u32) * tile_size;
+            let ty = (r as u32) * tile_size;
+            let tw = tile_size.min(width - tx);
+            let th = tile_size.min(height - ty);
+
+            if force_key || h != self.prev_hashes[idx] {
+                self.prev_hashes[idx] = h;
+                self.needs_refinement[idx] = true;
+                self.static_ticks[idx] = 0;
+                jobs.push(TileEncodeJob {
+                    tx,
+                    ty,
+                    tw,
+                    th,
+                    is_png: false,
+                });
+            } else if self.needs_refinement[idx] {
+                self.static_ticks[idx] = self.static_ticks[idx].saturating_add(1);
+                if self.static_ticks[idx] >= self.refine_ticks
+                    && refined_this_frame < MAX_REFINEMENTS_PER_FRAME
+                {
+                    self.needs_refinement[idx] = false;
+                    refined_this_frame += 1;
+                    jobs.push(TileEncodeJob {
+                        tx,
+                        ty,
+                        tw,
+                        th,
+                        is_png: true,
+                    });
                 }
             }
         }
+
+        // Step 3: Multi-core parallel JPEG / PNG encoding (inline when <= 2 dirty tiles to avoid thread wake overhead)
+        let jpeg_q = self.jpeg_quality;
+        let encode_one = |job: &TileEncodeJob| -> Option<EncodedTile> {
+            if job.is_png {
+                encode_tile_png(rgba, stride, job.tx, job.ty, job.tw, job.th)
+                    .ok()
+                    .map(|data| EncodedTile {
+                        x: job.tx as u16,
+                        y: job.ty as u16,
+                        w: job.tw as u16,
+                        h: job.th as u16,
+                        encoding: TileEncoding::PngLossless,
+                        flags: 1,
+                        data,
+                    })
+            } else {
+                encode_tile_jpeg(rgba, stride, job.tx, job.ty, job.tw, job.th, jpeg_q)
+                    .ok()
+                    .map(|data| EncodedTile {
+                        x: job.tx as u16,
+                        y: job.ty as u16,
+                        w: job.tw as u16,
+                        h: job.th as u16,
+                        encoding: TileEncoding::JpegLossy,
+                        flags: 0,
+                        data,
+                    })
+            }
+        };
+
+        let tiles: Vec<EncodedTile> = if jobs.len() <= 2 || workers <= 1 {
+            jobs.iter().filter_map(encode_one).collect()
+        } else {
+            let chunk_len = jobs.len().div_ceil(workers);
+            let mut groups: Vec<Vec<EncodedTile>> = Vec::with_capacity(workers);
+            std::thread::scope(|s| {
+                let mut handles = Vec::new();
+                for job_slice in jobs.chunks(chunk_len) {
+                    handles.push(s.spawn(move || {
+                        job_slice.iter().filter_map(encode_one).collect::<Vec<_>>()
+                    }));
+                }
+                for h in handles {
+                    if let Ok(part) = h.join() {
+                        groups.push(part);
+                    }
+                }
+            });
+            groups.into_iter().flatten().collect()
+        };
 
         if refined_this_frame > 0 {
             flags |= frame_flags::LOSSLESS_REFINEMENT;
         }
         let pkt = VideoTileFramePacket {
-            capture_ts_us,
+            capture_ts_us: capture_ts_us,
             frame_id: self.frame_id,
             screen_w: self.width as u16,
             screen_h: self.height as u16,
@@ -134,8 +246,57 @@ impl CompoundTileEncoder {
     }
 }
 
-/// Zero-allocation (reuses `dst` capacity) 2x2 subpixel box/area downsampler.
-/// Eliminates 33 MB/frame heap clones on 4K displays while keeping thin UI/font strokes crisp.
+fn downsample_rows(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    dw: usize,
+    dh: usize,
+    start_dy: usize,
+    dst_slice: &mut [u8],
+) {
+    let src_stride = sw * 4;
+    let dst_stride = dw * 4;
+    let rows = dst_slice.len() / dst_stride;
+    for local_y in 0..rows {
+        let dy = start_dy + local_y;
+        let sy0 = (dy * sh) / dh;
+        let sy1 = (((dy * 2 + 1) * sh) / (dh * 2)).min(sh - 1);
+        let row0 = sy0 * src_stride;
+        let row1 = sy1 * src_stride;
+        let dst_row = local_y * dst_stride;
+
+        for dx in 0..dw {
+            let sx0 = ((dx * sw) / dw) * 4;
+            let sx1 = ((((dx * 2 + 1) * sw) / (dw * 2)).min(sw - 1)) * 4;
+
+            let p00 = row0 + sx0;
+            let p10 = row0 + sx1;
+            let p01 = row1 + sx0;
+            let p11 = row1 + sx1;
+            let out_p = dst_row + dx * 4;
+
+            dst_slice[out_p] =
+                ((src[p00] as u16 + src[p10] as u16 + src[p01] as u16 + src[p11] as u16 + 2) >> 2)
+                    as u8;
+            dst_slice[out_p + 1] = ((src[p00 + 1] as u16
+                + src[p10 + 1] as u16
+                + src[p01 + 1] as u16
+                + src[p11 + 1] as u16
+                + 2)
+                >> 2) as u8;
+            dst_slice[out_p + 2] = ((src[p00 + 2] as u16
+                + src[p10 + 2] as u16
+                + src[p01 + 2] as u16
+                + src[p11 + 2] as u16
+                + 2)
+                >> 2) as u8;
+            dst_slice[out_p + 3] = 255;
+        }
+    }
+}
+
+/// Zero-allocation (reuses `dst` capacity) multi-core 2x2 subpixel box/area downsampler.
 pub fn downsample_rgba_crisp(
     src: &[u8],
     src_w: u32,
@@ -155,30 +316,21 @@ pub fn downsample_rgba_crisp(
         return;
     }
     dst.resize(needed, 255);
-    let src_stride = sw * 4;
 
-    for dy in 0..dh {
-        let sy0 = (dy * sh) / dh;
-        let sy1 = (((dy * 2 + 1) * sh) / (dh * 2)).min(sh - 1);
-        let row0 = sy0 * src_stride;
-        let row1 = sy1 * src_stride;
-        let dst_row = dy * dw * 4;
-
-        for dx in 0..dw {
-            let sx0 = ((dx * sw) / dw) * 4;
-            let sx1 = ((((dx * 2 + 1) * sw) / (dw * 2)).min(sw - 1)) * 4;
-
-            let p00 = row0 + sx0;
-            let p10 = row0 + sx1;
-            let p01 = row1 + sx0;
-            let p11 = row1 + sx1;
-            let out_p = dst_row + dx * 4;
-
-            dst[out_p] = ((src[p00] as u16 + src[p10] as u16 + src[p01] as u16 + src[p11] as u16 + 2) >> 2) as u8;
-            dst[out_p + 1] = ((src[p00 + 1] as u16 + src[p10 + 1] as u16 + src[p01 + 1] as u16 + src[p11 + 1] as u16 + 2) >> 2) as u8;
-            dst[out_p + 2] = ((src[p00 + 2] as u16 + src[p10 + 2] as u16 + src[p01 + 2] as u16 + src[p11 + 2] as u16 + 2) >> 2) as u8;
-            dst[out_p + 3] = 255;
-        }
+    let workers = worker_budget();
+    if dh >= 256 && workers > 1 {
+        let rows_per_chunk = dh.div_ceil(workers);
+        let bytes_per_chunk = rows_per_chunk * dw * 4;
+        std::thread::scope(|s| {
+            for (chunk_idx, out_chunk) in dst.chunks_mut(bytes_per_chunk).enumerate() {
+                let start_dy = chunk_idx * rows_per_chunk;
+                s.spawn(move || {
+                    downsample_rows(src, sw, sh, dw, dh, start_dy, out_chunk);
+                });
+            }
+        });
+    } else {
+        downsample_rows(src, sw, sh, dw, dh, 0, dst);
     }
 }
 
@@ -230,7 +382,15 @@ fn extract_tile_rgb(rgba: &[u8], stride: usize, tx: u32, ty: u32, tw: u32, th: u
     rgb
 }
 
-fn encode_tile_jpeg(rgba: &[u8], stride: usize, tx: u32, ty: u32, tw: u32, th: u32, q: u8) -> Result<Vec<u8>, String> {
+fn encode_tile_jpeg(
+    rgba: &[u8],
+    stride: usize,
+    tx: u32,
+    ty: u32,
+    tw: u32,
+    th: u32,
+    q: u8,
+) -> Result<Vec<u8>, String> {
     let rgb = extract_tile_rgb(rgba, stride, tx, ty, tw, th);
     let mut out = Cursor::new(Vec::with_capacity(4096));
     JpegEncoder::new_with_quality(&mut out, q)
@@ -239,7 +399,14 @@ fn encode_tile_jpeg(rgba: &[u8], stride: usize, tx: u32, ty: u32, tw: u32, th: u
     Ok(out.into_inner())
 }
 
-fn encode_tile_png(rgba: &[u8], stride: usize, tx: u32, ty: u32, tw: u32, th: u32) -> Result<Vec<u8>, String> {
+fn encode_tile_png(
+    rgba: &[u8],
+    stride: usize,
+    tx: u32,
+    ty: u32,
+    tw: u32,
+    th: u32,
+) -> Result<Vec<u8>, String> {
     let rgb = extract_tile_rgb(rgba, stride, tx, ty, tw, th);
     let mut out = Cursor::new(Vec::with_capacity(4096));
     PngEncoder::new_with_quality(&mut out, CompressionType::Fast, PngFilterType::Adaptive)
@@ -250,16 +417,23 @@ fn encode_tile_png(rgba: &[u8], stride: usize, tx: u32, ty: u32, tw: u32, th: u3
 
 fn fnv1a_tile(rgba: &[u8], stride: usize, tx: usize, ty: usize, tw: usize, th: usize) -> u64 {
     let mut h: u64 = 14695981039346656037;
+    let row_bytes = tw * 4;
     for y in 0..th {
-        let row = (ty + y) * stride + tx * 4;
-        for x in 0..tw {
-            let p = row + x * 4;
-            let px = (rgba[p] as u64) | ((rgba[p + 1] as u64) << 8) | ((rgba[p + 2] as u64) << 16);
+        let start = (ty + y) * stride + tx * 4;
+        let line = &rgba[start..start + row_bytes];
+        for px_bytes in line.chunks_exact(4) {
+            let px = (px_bytes[0] as u64)
+                | ((px_bytes[1] as u64) << 8)
+                | ((px_bytes[2] as u64) << 16);
             h ^= px;
             h = h.wrapping_mul(1099511628211);
         }
     }
-    if h == 0 { 1 } else { h }
+    if h == 0 {
+        1
+    } else {
+        h
+    }
 }
 
 #[cfg(test)]
@@ -267,18 +441,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crisp_downsampler_and_paced_png_refinement() {
-        let src = vec![120u8; 640 * 480 * 4];
+    fn multicore_crisp_downsampler_and_paced_png_refinement() {
+        // Test dh >= 256 multi-core downsampler path
+        let src = vec![120u8; 1280 * 720 * 4];
         let mut dst = Vec::new();
-        downsample_rgba_crisp(&src, 640, 480, 320, 240, &mut dst);
-        assert_eq!(dst.len(), 320 * 240 * 4);
+        downsample_rgba_crisp(&src, 1280, 720, 640, 360, &mut dst);
+        assert_eq!(dst.len(), 640 * 360 * 4);
         assert_eq!(dst[0], 120);
+        assert_eq!(dst[dst.len() - 4], 120);
 
-        // 8x4 grid = 32 tiles (1024x512); static refinement must cap at MAX_REFINEMENTS_PER_FRAME (16)
+        // 8x4 grid = 32 tiles (1024x512); exercises both parallel hashing (n=32>=24) and parallel encoding (jobs=32>2)
         let frame = vec![90u8; 1024 * 512 * 4];
         let mut enc = CompoundTileEncoder::new(1024, 512, 128, 70, 2);
         let (p1, _) = enc.encode_rgba(&frame, 1, true);
         assert_eq!(p1.tiles.len(), 32);
+        assert_eq!(p1.tiles[0].x, 0);
+        assert_eq!(p1.tiles[0].y, 0);
+        assert_eq!(p1.tiles[31].x, 896);
+        assert_eq!(p1.tiles[31].y, 384);
+
         let (p2, _) = enc.encode_rgba(&frame, 2, false);
         assert_eq!(p2.tiles.len(), 0);
         let (p3, f3) = enc.encode_rgba(&frame, 3, false);

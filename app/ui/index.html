@@ -241,6 +241,19 @@
     color: #fde68a; padding: 8px 16px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
     display: none; align-items: center; gap: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.45);
   }
+  .viewer-transfer-pill {
+    position: absolute; top: 16px; right: 18px; z-index: 46;
+    background: rgba(15, 23, 42, 0.94); border: 1px solid rgba(56, 189, 248, 0.48);
+    color: #e0f2fe; padding: 8px 14px; border-radius: 10px; font-size: 12px; font-weight: 600;
+    display: none; align-items: center; gap: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.48);
+  }
+  .viewer-drop-hint {
+    position: absolute; inset: 14px; z-index: 50; border-radius: 14px;
+    border: 2px dashed #38bdf8; background: rgba(15, 23, 42, 0.72);
+    color: #bae6fd; font-size: 15px; font-weight: 600; pointer-events: none;
+    display: none; align-items: center; justify-content: center;
+  }
+  .viewer-stage.dragover .viewer-drop-hint { display: flex; }
 
   /* Remote Viewer Cinema Stage */
   .viewer-bar {
@@ -544,6 +557,11 @@
     </div>
 
     <div class="viewer-stage" id="viewerStage">
+      <div id="viewerDropHint" class="viewer-drop-hint">📂 松开鼠标即可将文件或整个文件夹加密直传至远端共享目录</div>
+      <div id="viewerTransferPill" class="viewer-transfer-pill">
+        <span id="viewerTransferText">准备传输...</span>
+        <button id="viewerCancelTransferBtn" type="button" class="btn xs danger" style="display:none">✕ 取消</button>
+      </div>
       <div id="reconnBanner" class="reconn-banner">
         <span id="reconnText">🔄 连接中断，正在自动重连...</span>
         <button id="btnCancelReconn" type="button" class="btn xs danger">停止重连</button>
@@ -585,6 +603,7 @@
           <input id="newFolderName" class="input" style="height:34px;font-size:12.5px" placeholder="输入新文件夹名称..." value="" />
           <button id="btnMkdir" type="button" class="btn xs ghost" style="height:34px;flex-shrink:0">➕ 新建文件夹</button>
         </div>
+        <div id="remoteRootHint" style="font-size:11.5px;color:var(--muted);margin-top:6px;word-break:break-all"></div>
         <div id="fileList" class="file-list">
           <div style="color:var(--muted);font-size:13px;padding:12px 0">连接远端后点击「刷新目录」查看并下载文件</div>
         </div>
@@ -602,11 +621,15 @@
         </div>
 
         <input id="filePicker" type="file" multiple style="display:none" />
+        <input id="folderPicker" type="file" webkitdirectory directory multiple style="display:none" />
         <div id="dropZone" class="drop-zone">
           <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#1677ff" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          <div style="font-size:14px;font-weight:600;color:var(--text)">点击选择本地文件，或将文件拖拽到此处</div>
-          <div style="font-size:12px;color:var(--muted)">支持多文件批量上传 · 256 KB 分块流式传输 · 自动校验 SHA-256</div>
-          <button id="btnPickFiles" type="button" class="btn sm" style="margin-top:4px">选择本地文件</button>
+          <div style="font-size:14px;font-weight:600;color:var(--text)">点击选择文件/文件夹，或直接拖拽到此处（含远程画面舞台）</div>
+          <div style="font-size:12px;color:var(--muted)">支持多文件与整目录递归上传 · 256 KB 分块流式传输 · 自动校验 SHA-256</div>
+          <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;justify-content:center">
+            <button id="btnPickFiles" type="button" class="btn sm">选择本地文件</button>
+            <button id="btnPickFolder" type="button" class="btn sm ghost">📁 选择文件夹上传</button>
+          </div>
         </div>
 
         <div id="transferProgressBox" class="progress-box">
@@ -685,22 +708,44 @@
     <div class="card">
       <div class="card-header">
         <div class="card-title">网络、无人值守与被控安全参数</div>
-        <button id="btnRotateSecret" class="btn xs ghost" title="仅在更换新设备代码且需重新生成本机归属证明时使用">重置防抢注密钥</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="btnApplyHostSettings" type="button" class="btn xs">↻ 保存并热重载被控</button>
+          <button id="btnRotateSecret" class="btn xs ghost" title="仅在更换新设备代码且需重新生成本机归属证明时使用">重置防抢注密钥</button>
+        </div>
       </div>
       <div class="two-col">
         <div class="field"><label>本机监听地址 (0.0.0.0 允许同局域网 P2P 自动直连)</label><input id="hostBind" class="input" value="0.0.0.0:19800" /></div>
         <div class="field"><label>本机设备代码 (首次注册后自动绑定本机防抢注密钥)</label><input id="hostDevId" class="input" value="888100200" /></div>
         <div class="field"><label>中继服务器地址 (可选，留空仅直连)</label><input id="hostRelay" class="input" value="38.34.13.214:19901" placeholder="例如 38.34.13.214:19901" /></div>
-        <div class="field"><label>固定无人值守密码（可选，设置后与临时密码同时生效，重启被控生效）</label><input id="hostPermPwd" class="input" type="password" value="" placeholder="留空则仅允许首页临时密码连接" /></div>
+        <div class="field"><label>固定无人值守密码（可选，设置后与临时密码同时生效）</label><input id="hostPermPwd" class="input" type="password" value="" placeholder="留空则仅允许首页临时密码连接" /></div>
       </div>
-      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:14px">
+      <div class="field" style="margin-top:12px">
+        <label>本机被控共享文件根目录（绝对路径，留空默认持久化至 Downloads/CopyToDesk-Shared）</label>
+        <div style="display:flex;gap:8px">
+          <input id="hostFileRoot" class="input" value="" placeholder="留空默认使用 Downloads/CopyToDesk-Shared" />
+          <button id="btnOpenSharedRoot" type="button" class="btn sm ghost" style="height:42px;flex-shrink:0">📂 打开本机共享目录</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:14px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="hostOsAutoStart" style="width:16px;height:16px" />
+          <span>系统开机登录时自动后台静默启动进托盘（免管理员，7×24 无人值守推荐）</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="hostPreventSleep" checked style="width:16px;height:16px" />
+          <span>被控运行期间防止系统自动休眠断网（Win32 / macOS caffeinate / Linux 防睡眠）</span>
+        </label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
           <input type="checkbox" id="hostCloseToTray" checked style="width:16px;height:16px" />
           <span>点击关闭按钮 (×) 时最小化到系统托盘继续守护运行</span>
         </label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
           <input type="checkbox" id="hostAutoStart" style="width:16px;height:16px" />
-          <span>启动 CopyToDesk 时自动开启本机被控服务（推荐无人值守勾选）</span>
+          <span>启动 CopyToDesk 时自动开启本机被控服务</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="hostAutoClipSync" checked style="width:16px;height:16px" />
+          <span>远端复制文本时无感自动回传同步至本机剪贴板（含鼠标右键复制）</span>
         </label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
           <input type="checkbox" id="hostAllowInput" checked style="width:16px;height:16px" />
@@ -710,6 +755,10 @@
           <input type="checkbox" id="hostExec" checked style="width:16px;height:16px" />
           <span>允许受控白名单命令 (echo / hostname / whoami)</span>
         </label>
+      </div>
+      <div style="margin-top:14px;padding:10px 12px;border-radius:9px;background:#f8fafc;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:12px;color:var(--text-2)">💡 macOS 首次安装开源未公证 DMG 如提示“无法验证/已损坏”，可在终端运行清除隔离属性命令放行</span>
+        <button id="btnCopyMacFix" type="button" class="btn xs ghost">📋 复制 macOS 放行命令</button>
       </div>
     </div>
 

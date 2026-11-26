@@ -100,6 +100,16 @@ window.addEventListener('DOMContentLoaded', () => {
     return null;
   }
 
+  function getTauriChannelCtor() {
+    if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.Channel === 'function') {
+      return window.__TAURI__.core.Channel;
+    }
+    if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.Channel === 'function') {
+      return window.__TAURI_INTERNALS__.Channel;
+    }
+    return null;
+  }
+
   let invoke = getTauriInvoke();
   let isTauri = Boolean(invoke);
   let localOs = navigator.platform.toLowerCase().includes('mac') ? 'macos' : 'windows';
@@ -119,6 +129,7 @@ window.addEventListener('DOMContentLoaded', () => {
   let renamingFilePath = null;
   let transferActive = false;
   let uploadCancelRequested = false;
+  let viewerPillHideTimer = null;
   let autoTier = '1280:68';
   let webLoopToken = 0;
   let origW = 1280;
@@ -357,8 +368,11 @@ window.addEventListener('DOMContentLoaded', () => {
         hostPermPwd: $('hostPermPwd').value,
         hostBind: $('hostBind').value,
         hostRelay: $('hostRelay').value,
+        hostFileRoot: $('hostFileRoot').value,
+        hostPreventSleep: $('hostPreventSleep').checked,
         hostCloseToTray: $('hostCloseToTray').checked,
         hostAutoStart: $('hostAutoStart').checked,
+        hostAutoClipSync: $('hostAutoClipSync').checked,
         hostAllowInput: $('hostAllowInput').checked,
         hostExec: $('hostExec').checked,
         connMode,
@@ -397,8 +411,11 @@ window.addEventListener('DOMContentLoaded', () => {
           $('hostBind').value = (fromV1 && d.hostBind.trim() === '127.0.0.1:19800') ? '0.0.0.0:19800' : d.hostBind;
         }
         if (typeof d.hostRelay === 'string') $('hostRelay').value = d.hostRelay;
+        if (typeof d.hostFileRoot === 'string') $('hostFileRoot').value = d.hostFileRoot;
+        if (typeof d.hostPreventSleep === 'boolean') $('hostPreventSleep').checked = d.hostPreventSleep;
         if (typeof d.hostCloseToTray === 'boolean') $('hostCloseToTray').checked = d.hostCloseToTray;
         if (typeof d.hostAutoStart === 'boolean') $('hostAutoStart').checked = d.hostAutoStart;
+        if (typeof d.hostAutoClipSync === 'boolean') $('hostAutoClipSync').checked = d.hostAutoClipSync;
         if (typeof d.hostAllowInput === 'boolean') $('hostAllowInput').checked = d.hostAllowInput;
         if (typeof d.hostExec === 'boolean') $('hostExec').checked = d.hostExec;
         if (typeof d.connDirect === 'string') $('connDirect').value = d.connDirect;
@@ -459,7 +476,7 @@ window.addEventListener('DOMContentLoaded', () => {
     return { maxWidth: Number(parts[0]) || 0, quality: Number(parts[1]) || 68 };
   }
 
-  for (const id of ['hostDevId', 'hostToken', 'hostPermPwd', 'hostBind', 'hostRelay', 'connDirect', 'connDevId', 'connToken']) {
+  for (const id of ['hostDevId', 'hostToken', 'hostPermPwd', 'hostBind', 'hostRelay', 'hostFileRoot', 'connDirect', 'connDevId', 'connToken']) {
     $(id).addEventListener('input', () => {
       if (id === 'hostDevId') $('displayCode').textContent = formatDeviceCode($('hostDevId').value);
       if (id === 'hostBind') $('hostAddrHint').textContent = `局域网直连监听：${$('hostBind').value.trim() || '0.0.0.0:19800'}`;
@@ -478,14 +495,52 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  for (const id of ['hostAutoStart', 'hostAllowInput', 'hostExec', 'connSavePwd']) {
+  for (const id of ['hostPreventSleep', 'hostAutoStart', 'hostAutoClipSync', 'hostAllowInput', 'hostExec', 'connSavePwd']) {
     $(id).addEventListener('change', saveSettings);
   }
+  $('hostOsAutoStart').addEventListener('change', async () => {
+    if (!isTauri || !invoke) {
+      $('hostOsAutoStart').checked = false;
+      toast('仅桌面安装包支持系统开机自启', 'err');
+      return;
+    }
+    const want = $('hostOsAutoStart').checked;
+    try {
+      await invoke('set_os_autostart', { enabled: want });
+      if (want && !$('hostAutoStart').checked) {
+        $('hostAutoStart').checked = true;
+        saveSettings();
+      }
+      toast(want ? '已开启系统开机自启（登录时静默进托盘并自动开启被控）' : '已关闭系统开机自启', 'ok');
+      log(`系统开机自启状态已更新: ${want}`);
+    } catch (e) {
+      $('hostOsAutoStart').checked = !want;
+      toast('设置开机自启失败: ' + e, 'err');
+    }
+  });
   $('hostCloseToTray').addEventListener('change', () => {
     saveSettings();
     if (isTauri && invoke) {
       invoke('set_close_to_tray', { enabled: $('hostCloseToTray').checked }).catch(() => {});
     }
+  });
+  $('btnOpenSharedRoot').addEventListener('click', async () => {
+    if (!isTauri || !invoke) {
+      toast('仅桌面端支持打开本机共享目录');
+      return;
+    }
+    try {
+      const dir = await invoke('open_shared_dir', { customPath: $('hostFileRoot').value.trim() });
+      toast('已打开本机共享目录: ' + dir);
+    } catch (e) {
+      toast('打开共享目录失败: ' + e, 'err');
+    }
+  });
+  $('btnCopyMacFix').addEventListener('click', async () => {
+    const cmd = 'sudo xattr -rd com.apple.quarantine /Applications/CopyToDesk.app';
+    if (isTauri && invoke) await invoke('local_clipboard_set', { text: cmd }).catch(() => {});
+    else if (navigator.clipboard) navigator.clipboard.writeText(cmd).catch(() => {});
+    toast('已复制 macOS 放行命令，粘贴至终端执行即可', 'ok');
   });
 
   $('btnClearBook').addEventListener('click', () => {
@@ -609,11 +664,11 @@ window.addEventListener('DOMContentLoaded', () => {
     setTimeout(refreshHostStatusAudit, 400);
   });
 
-  $('btnStartHost').addEventListener('click', async () => {
+  async function startHostService(silent = false) {
     invoke = getTauriInvoke();
     if (!invoke) {
-      toast('当前非桌面安装包环境，无法启动本机被控', 'err');
-      return;
+      if (!silent) toast('当前非桌面安装包环境，无法启动本机被控', 'err');
+      return false;
     }
     saveSettings();
     $('btnStartHost').disabled = true;
@@ -633,10 +688,12 @@ window.addEventListener('DOMContentLoaded', () => {
           fps: 25,
           jpegQuality: 72,
           forceSynthetic: false,
-          fileRoot: '',
+          fileRoot: $('hostFileRoot').value.trim(),
           allowInput: $('hostAllowInput').checked,
           allowExec: $('hostExec').checked,
           execAllowlist: ['echo', 'hostname', 'whoami'],
+          preventSleep: $('hostPreventSleep').checked,
+          autoClipboardSync: $('hostAutoClipSync').checked,
         },
       });
       hostRunning = true;
@@ -645,22 +702,41 @@ window.addEventListener('DOMContentLoaded', () => {
       const monCount = (st.monitors && st.monitors.length) ? ` · ${st.monitors.length}屏` : '';
       $('captureInfoBadge').textContent = `${st.captureBackend} · ${st.width}×${st.height}${monCount}`;
       const lanHint = (st.lanAddrs && st.lanAddrs.length > 0) ? `局域网IP: ${st.lanAddrs.join(', ')}` : st.bindAddr;
-      $('hostAddrHint').textContent = `${lanHint}（E2EE + 20s 保活已启用）`;
+      const sleepTag = st.preventSleep ? ' + 防休眠' : '';
+      $('hostAddrHint').textContent = `${lanHint}（E2EE${sleepTag} + 20s 保活已启用）`;
       $('hostQuickInfo').textContent = `被控运行中 (${relayVal ? '中继+内网双栈' : st.bindAddr})`;
       $('hostNavDot').className = 'nav-dot on';
       $('btnStartHost').style.display = 'none';
       $('btnStopHost').style.display = 'inline-flex';
-      log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} (${(st.monitors || []).length} 显示器) | LAN=${(st.lanAddrs || []).join(',')}`);
-      toast(`被控已启动 (${st.width}×${st.height})`, 'ok');
+      log(`被控启动成功: ${st.captureBackend} ${st.width}x${st.height} | 共享目录=${st.fileRoot || ''}`);
+      if (!silent) toast(`被控已启动 (${st.width}×${st.height})`, 'ok');
       setTimeout(refreshHostStatusAudit, 800);
+      return true;
     } catch (e) {
       $('hostBadge').textContent = '启动失败';
       $('hostBadge').className = 'badge err';
       log('被控启动失败: ' + e);
-      toast('启动失败: ' + e, 'err');
+      if (!silent) toast('启动失败: ' + e, 'err');
+      return false;
     } finally {
       $('btnStartHost').disabled = false;
       $('btnStartHost').textContent = '启动被控服务';
+    }
+  }
+
+  $('btnStartHost').addEventListener('click', () => {
+    startHostService(false);
+  });
+
+  $('btnApplyHostSettings').addEventListener('click', async () => {
+    saveSettings();
+    if (hostRunning) {
+      const ok = await startHostService(true);
+      if (ok) {
+        toast('已保存配置并热重载本机被控服务', 'ok');
+      }
+    } else {
+      toast('设置已保存（下次开启被控立即生效）', 'ok');
     }
   });
 
@@ -743,55 +819,66 @@ window.addEventListener('DOMContentLoaded', () => {
     }, 1400);
   }
 
-  // ---- Off-Main-Thread createImageBitmap Tile Renderer + Zero-Black-Flash Resize ----
+  // ---- Zero-Base64 Binary IPC Channel + Off-Main-Thread createImageBitmap Renderer ----
   let renderChain = Promise.resolve();
   const snapCanvas = document.createElement('canvas');
   const snapCtx = snapCanvas.getContext('2d');
 
-  async function decodeTileImage(t) {
+  async function decodeBlobTile(blob, x, y, w, h) {
     if (typeof createImageBitmap === 'function') {
       try {
-        const u8 = base64ToUint8(t.dataBase64);
-        const blob = new Blob([u8], { type: t.mime });
         const bmp = await createImageBitmap(blob);
-        return { bmp, isBitmap: true, x: t.x, y: t.y, w: t.w, h: t.h };
+        return { bmp, isBitmap: true, x, y, w, h };
       } catch {
-        // fall through to Image element fallback
+        // fall through to object URL Image fallback
       }
     }
     return new Promise((resolve) => {
+      const url = URL.createObjectURL(blob);
       const img = new Image();
-      img.onload = () => resolve({ bmp: img, isBitmap: false, x: t.x, y: t.y, w: t.w, h: t.h });
-      img.onerror = () => resolve(null);
-      img.src = `data:${t.mime};base64,${t.dataBase64}`;
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve({ bmp: img, isBitmap: false, x, y, w, h });
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      };
+      img.src = url;
     });
   }
 
-  function handleTilePushEvent(ev) {
+  async function decodeTileImage(t) {
+    const u8 = base64ToUint8(t.dataBase64);
+    const blob = new Blob([u8], { type: t.mime });
+    return decodeBlobTile(blob, t.x, t.y, t.w, t.h);
+  }
+
+  function enqueueTileBatchRender(screenW, screenH, isKeyFrame, hasLossless, byteLen, decodeAllFn) {
     if (!connected) return;
     secFrames++;
-    secBytes += ev.byteLen || 0;
-    streamW = ev.screenW;
-    streamH = ev.screenH;
-    if (ev.isKeyFrame) losslessState = false;
-    if (ev.hasLossless) losslessState = true;
+    secBytes += byteLen || 0;
+    streamW = screenW;
+    streamH = screenH;
+    if (isKeyFrame) losslessState = false;
+    if (hasLossless) losslessState = true;
 
     renderChain = renderChain.then(async () => {
       if (!connected) return;
-      if (cvs.width !== ev.screenW || cvs.height !== ev.screenH) {
-        const hadPixels = cvs.width > 0 && cvs.height > 0 && !ev.isKeyFrame;
+      if (cvs.width !== screenW || cvs.height !== screenH) {
+        const hadPixels = cvs.width > 0 && cvs.height > 0 && !isKeyFrame;
         if (hadPixels) {
           snapCanvas.width = cvs.width;
           snapCanvas.height = cvs.height;
           snapCtx.drawImage(cvs, 0, 0);
         }
-        cvs.width = ev.screenW;
-        cvs.height = ev.screenH;
+        cvs.width = screenW;
+        cvs.height = screenH;
         if (hadPixels) {
-          ctx.drawImage(snapCanvas, 0, 0, ev.screenW, ev.screenH);
+          ctx.drawImage(snapCanvas, 0, 0, screenW, screenH);
         }
       }
-      const decoded = await Promise.all((ev.tiles || []).map(decodeTileImage));
+      const decoded = await decodeAllFn();
       for (const item of decoded) {
         if (item) {
           ctx.drawImage(item.bmp, item.x, item.y, item.w, item.h);
@@ -802,6 +889,71 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       updateHud();
     }).catch(() => {});
+  }
+
+  function handleBinaryTileFrame(rawMsg) {
+    if (!connected) return;
+    let u8 = null;
+    if (rawMsg instanceof ArrayBuffer) {
+      u8 = new Uint8Array(rawMsg);
+    } else if (ArrayBuffer.isView(rawMsg)) {
+      u8 = new Uint8Array(rawMsg.buffer, rawMsg.byteOffset, rawMsg.byteLength);
+    } else if (Array.isArray(rawMsg)) {
+      u8 = new Uint8Array(rawMsg);
+    }
+    if (!u8 || u8.byteLength < 25) return;
+
+    const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const hdrFlags = view.getUint8(0);
+    const screenW = view.getUint16(13, true);
+    const screenH = view.getUint16(15, true);
+    const count = view.getUint16(19, true);
+    const isKeyFrame = (hdrFlags & 1) !== 0;
+    const hasLossless = (hdrFlags & 2) !== 0;
+    const byteLen = u8.byteLength - 1;
+
+    const tileSlices = [];
+    let pos = 25;
+    for (let i = 0; i < count; i++) {
+      if (pos + 14 > u8.byteLength) break;
+      const x = view.getUint16(pos, true);
+      const y = view.getUint16(pos + 2, true);
+      const w = view.getUint16(pos + 4, true);
+      const h = view.getUint16(pos + 6, true);
+      const enc = view.getUint8(pos + 8);
+      const len = view.getUint32(pos + 10, true);
+      pos += 14;
+      if (pos + len > u8.byteLength) break;
+      const mime = enc === 2 ? 'image/png' : 'image/jpeg';
+      const bytes = u8.subarray(pos, pos + len);
+      tileSlices.push({ bytes, mime, x, y, w, h });
+      pos += len;
+    }
+
+    enqueueTileBatchRender(screenW, screenH, isKeyFrame, hasLossless, byteLen, () =>
+      Promise.all(tileSlices.map((s) => decodeBlobTile(new Blob([s.bytes], { type: s.mime }), s.x, s.y, s.w, s.h)))
+    );
+  }
+
+  function createFrameStreamChannel() {
+    const ChannelCtor = getTauriChannelCtor();
+    if (!ChannelCtor) return null;
+    const ch = new ChannelCtor();
+    ch.onmessage = (msg) => {
+      handleBinaryTileFrame(msg);
+    };
+    return ch;
+  }
+
+  function handleTilePushEvent(ev) {
+    enqueueTileBatchRender(
+      ev.screenW,
+      ev.screenH,
+      ev.isKeyFrame,
+      ev.hasLossless,
+      ev.byteLen || 0,
+      () => Promise.all((ev.tiles || []).map(decodeTileImage))
+    );
   }
 
   async function runWebFallbackLoop(myToken) {
@@ -892,7 +1044,8 @@ window.addEventListener('DOMContentLoaded', () => {
       try {
         const { maxWidth, quality } = currentQuality();
         const params = { ...lastConnectParams, initialMaxWidth: maxWidth, initialQuality: quality };
-        const info = await invoke('connect_remote', { params });
+        const frameChannel = createFrameStreamChannel();
+        const info = await invoke('connect_remote', { params, frameChannel });
         if (!reconnecting || reconnToken !== myReconn) return;
         applyConnectedInfo(info);
         reconnecting = false;
@@ -951,7 +1104,8 @@ window.addEventListener('DOMContentLoaded', () => {
           initialMaxWidth: maxWidth,
           initialQuality: quality,
         };
-        const info = await invoke('connect_remote', { params });
+        const frameChannel = createFrameStreamChannel();
+        const info = await invoke('connect_remote', { params, frameChannel });
         lastConnectParams = params;
         applyConnectedInfo(info);
         recordSavedDevice(connMode, targetStr, $('connToken').value, remoteOs);
@@ -1452,7 +1606,16 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ---- Chunked Streaming File Transfer + Full Sandbox File Manager ----
+  // ---- Chunked Streaming File Transfer + Recursive Folder Drop + Sandbox File Manager ----
+  function requestCancelTransfer() {
+    if (!transferActive) return;
+    uploadCancelRequested = true;
+    if (isTauri && invoke) {
+      invoke('remote_cancel_transfer').catch(() => {});
+    }
+    toast('正在中止当前传输...');
+  }
+
   function showTransferProgress(title, transferred, total, speedMBs, active = false) {
     transferActive = active;
     const box = $('transferProgressBox');
@@ -1461,18 +1624,29 @@ window.addEventListener('DOMContentLoaded', () => {
     const pct = total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 100;
     $('transferTitle').textContent = title;
     const speedStr = speedMBs > 0 ? ` · ${speedMBs.toFixed(1)} MB/s` : '';
-    $('transferStat').textContent = `${pct}% (${formatBytes(transferred)} / ${formatBytes(total)}${speedStr})`;
+    const statText = `${pct}% (${formatBytes(transferred)} / ${formatBytes(total)}${speedStr})`;
+    $('transferStat').textContent = statText;
     $('transferBar').style.width = `${pct}%`;
+
+    const pill = $('viewerTransferPill');
+    if (pill) {
+      if (viewerPillHideTimer) {
+        clearTimeout(viewerPillHideTimer);
+        viewerPillHideTimer = null;
+      }
+      pill.style.display = 'inline-flex';
+      $('viewerTransferText').textContent = `${title} · ${pct}%${speedStr}`;
+      $('viewerCancelTransferBtn').style.display = active ? 'inline-flex' : 'none';
+      if (!active) {
+        viewerPillHideTimer = setTimeout(() => {
+          pill.style.display = 'none';
+        }, 3200);
+      }
+    }
   }
 
-  $('btnCancelTransfer').addEventListener('click', () => {
-    if (!transferActive) return;
-    uploadCancelRequested = true;
-    if (isTauri && invoke) {
-      invoke('remote_cancel_transfer').catch(() => {});
-    }
-    toast('正在中止当前传输...');
-  });
+  $('btnCancelTransfer').addEventListener('click', requestCancelTransfer);
+  $('viewerCancelTransferBtn').addEventListener('click', requestCancelTransfer);
 
   function joinRemotePath(dir, name) {
     const cleanDir = String(dir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -1562,6 +1736,9 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!res.ok) {
       box.textContent = res.error;
       return;
+    }
+    if ($('remoteRootHint')) {
+      $('remoteRootHint').textContent = res.root ? `远端共享根目录：${res.root}` : '';
     }
     for (const f of res.entries || []) {
       const row = document.createElement('div');
@@ -1716,24 +1893,76 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  async function uploadFileList(files) {
-    if (!files || files.length === 0) return;
+  async function extractDroppedEntries(dataTransfer) {
+    const rawItems = dataTransfer && dataTransfer.items ? Array.from(dataTransfer.items) : [];
+    const fallbackFiles = dataTransfer && dataTransfer.files ? Array.from(dataTransfer.files) : [];
+    const rootEntries = rawItems
+      .map((it) => (typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null))
+      .filter(Boolean);
+
+    if (rootEntries.length === 0) {
+      return fallbackFiles.map((f) => ({ file: f, relPath: f.webkitRelativePath || f.name }));
+    }
+
+    const collected = [];
+    async function walkEntry(entry, prefix) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        collected.push({ file, relPath: rel });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const children = [];
+        while (true) {
+          const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          if (!batch || batch.length === 0) break;
+          children.push(...batch);
+        }
+        if (children.length === 0) {
+          collected.push({ emptyDir: rel });
+        } else {
+          for (const child of children) {
+            await walkEntry(child, rel);
+          }
+        }
+      }
+    }
+
+    for (const root of rootEntries) {
+      await walkEntry(root, '');
+    }
+    return collected;
+  }
+
+  async function uploadEntryItems(items) {
+    if (!items || items.length === 0) return;
     if (!connected) {
-      toast('请先连接远端设备后再上传文件', 'err');
+      toast('请先连接远端设备后再上传文件或文件夹', 'err');
       return;
     }
     uploadCancelRequested = false;
     const baseDir = $('upTargetDir').value.trim() || $('dirPath').value.trim();
+    let uploadedFiles = 0;
 
-    for (const file of Array.from(files)) {
+    for (const item of items) {
       if (uploadCancelRequested) break;
-      const remotePath = joinRemotePath(baseDir, file.name);
+      if (item.emptyDir) {
+        if (isTauri && invoke) {
+          const dirRel = joinRemotePath(baseDir, item.emptyDir);
+          await invoke('remote_file_action', { action: 'mkdir', remotePath: dirRel, newName: null }).catch(() => {});
+        }
+        continue;
+      }
+
+      const file = item.file;
+      const relName = item.relPath || file.webkitRelativePath || file.name;
+      const remotePath = joinRemotePath(baseDir, relName);
       const total = file.size;
       const uploadId = `up-${randomHex(6)}`;
       const t0 = performance.now();
 
       try {
-        showTransferProgress(`⬆ 正在上传 ${file.name}`, 0, Math.max(1, total), 0, true);
+        showTransferProgress(`⬆ 正在上传 ${relName}`, 0, Math.max(1, total), 0, true);
 
         if (isTauri && invoke) {
           if (total === 0) {
@@ -1750,8 +1979,8 @@ window.addEventListener('DOMContentLoaded', () => {
             while (offset < total) {
               if (uploadCancelRequested) {
                 await invoke('remote_file_action', { action: 'cancelUpload', remotePath, newName: null }).catch(() => {});
-                showTransferProgress(`✕ 已取消上传 ${file.name}`, offset, total, 0, false);
-                toast(`已取消上传 ${file.name}`);
+                showTransferProgress(`✕ 已取消上传 ${relName}`, offset, total, 0, false);
+                toast(`已取消上传 ${relName}`);
                 return;
               }
               const end = Math.min(offset + FILE_CHUNK_BYTES, total);
@@ -1769,14 +1998,14 @@ window.addEventListener('DOMContentLoaded', () => {
               offset = end;
               const sec = Math.max(0.01, (performance.now() - t0) / 1000);
               const speed = (offset / (1024 * 1024)) / sec;
-              showTransferProgress(`⬆ 正在上传 ${file.name}`, offset, total, speed, true);
+              showTransferProgress(`⬆ 正在上传 ${relName}`, offset, total, speed, true);
             }
           }
           const sec = Math.max(0.01, (performance.now() - t0) / 1000);
           const speed = (total / (1024 * 1024)) / sec;
-          showTransferProgress(`✓ 上传成功 ${file.name} (SHA-256 已校验)`, total, Math.max(1, total), speed, false);
+          showTransferProgress(`✓ 上传成功 ${relName} (SHA-256 已校验)`, total, Math.max(1, total), speed, false);
           log(`分块上传完成: ${remotePath} (${formatBytes(total)})`);
-          toast(`已上传 ${file.name} (${formatBytes(total)})`, 'ok');
+          uploadedFiles++;
         } else {
           const ab = await file.arrayBuffer();
           const b64 = uint8ToBase64(new Uint8Array(ab));
@@ -1793,23 +2022,36 @@ window.addEventListener('DOMContentLoaded', () => {
           });
           const res = await r.json();
           if (!res.ok) throw new Error(res.error || 'Upload failed');
-          showTransferProgress(`✓ 上传成功 ${file.name}`, total, Math.max(1, total), 0);
-          toast(`已上传 ${file.name}`, 'ok');
+          showTransferProgress(`✓ 上传成功 ${relName}`, total, Math.max(1, total), 0, false);
+          uploadedFiles++;
         }
       } catch (e) {
-        showTransferProgress(`✕ 上传中断 (${file.name})`, 0, 1, 0, false);
-        toast(`上传 ${file.name} 失败: ` + e, 'err');
-        log(`上传失败 (${file.name}): ` + e);
+        showTransferProgress(`✕ 上传中断 (${relName})`, 0, 1, 0, false);
+        toast(`上传 ${relName} 失败: ` + e, 'err');
+        log(`上传失败 (${relName}): ` + e);
         return;
       }
     }
 
+    if (uploadedFiles > 0) {
+      toast(uploadedFiles === 1 ? '文件上传完成 (SHA-256 已校验)' : `已完成 ${uploadedFiles} 个文件递归上传`, 'ok');
+    }
     refreshRemoteDir().catch(() => {});
+  }
+
+  async function uploadFileList(files) {
+    if (!files || files.length === 0) return;
+    const items = Array.from(files).map((f) => ({ file: f, relPath: f.webkitRelativePath || f.name }));
+    await uploadEntryItems(items);
   }
 
   $('btnPickFiles').addEventListener('click', (ev) => {
     ev.stopPropagation();
     $('filePicker').click();
+  });
+  $('btnPickFolder').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    $('folderPicker').click();
   });
   $('dropZone').addEventListener('click', () => $('filePicker').click());
   $('filePicker').addEventListener('change', () => {
@@ -1818,21 +2060,36 @@ window.addEventListener('DOMContentLoaded', () => {
       $('filePicker').value = '';
     }
   });
+  $('folderPicker').addEventListener('change', () => {
+    if ($('folderPicker').files && $('folderPicker').files.length > 0) {
+      uploadFileList($('folderPicker').files);
+      $('folderPicker').value = '';
+    }
+  });
 
   for (const zone of [$('dropZone'), $('viewerStage')]) {
     if (!zone) continue;
     zone.addEventListener('dragover', (ev) => {
       ev.preventDefault();
-      if (zone === $('dropZone')) zone.classList.add('dragover');
+      if (zone === $('viewerStage') && !connected) return;
+      zone.classList.add('dragover');
     });
-    zone.addEventListener('dragleave', () => {
-      if (zone === $('dropZone')) zone.classList.remove('dragover');
+    zone.addEventListener('dragleave', (ev) => {
+      if (!zone.contains(ev.relatedTarget)) {
+        zone.classList.remove('dragover');
+      }
     });
-    zone.addEventListener('drop', (ev) => {
+    zone.addEventListener('drop', async (ev) => {
       ev.preventDefault();
-      if (zone === $('dropZone')) zone.classList.remove('dragover');
-      if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length > 0) {
-        uploadFileList(ev.dataTransfer.files);
+      zone.classList.remove('dragover');
+      if (!ev.dataTransfer) return;
+      try {
+        const items = await extractDroppedEntries(ev.dataTransfer);
+        if (items.length > 0) {
+          await uploadEntryItems(items);
+        }
+      } catch (e) {
+        toast('读取拖拽文件失败: ' + e, 'err');
       }
     });
   }
@@ -1912,6 +2169,14 @@ window.addEventListener('DOMContentLoaded', () => {
         listen('remote-disconnected', (event) => {
           handleUnexpectedDisconnect(event.payload);
         });
+        listen('remote-clipboard-push', async (event) => {
+          if (!connected || !$('hostAutoClipSync').checked) return;
+          const txt = typeof event.payload === 'string' ? event.payload : '';
+          if (!txt) return;
+          $('clipBox').value = txt;
+          await invoke('local_clipboard_set', { text: txt }).catch(() => {});
+          log(`剪贴板已无感同步自远端 (${txt.length} 字符)`);
+        });
         listen('file-transfer-progress', (event) => {
           const p = event.payload || {};
           if (p.direction === 'download') {
@@ -1924,13 +2189,23 @@ window.addEventListener('DOMContentLoaded', () => {
         const info = await invoke('get_platform_info');
         localOs = info.os || localOs;
         updateKeyMapBtn();
+        if (typeof info.osAutoStart === 'boolean') {
+          $('hostOsAutoStart').checked = info.osAutoStart;
+        }
+        if (info.sharedDir && !$('hostFileRoot').value) {
+          $('hostFileRoot').placeholder = `默认持久化至 ${info.sharedDir}`;
+        }
         $('modeSubtitle').textContent = `Tauri 2 · ${info.os}/${info.arch}`;
         $('engineDot').className = 'dot ok';
         $('engineText').textContent = `原生引擎就绪 v${info.version}`;
         log(`Tauri 2 引擎就绪 (${info.os}/${info.arch} v${info.version})`);
-        if ($('hostAutoStart').checked && !hostRunning) {
-          log('检测到已勾选「启动时自动开启被控服务」，正在自动启动...');
-          $('btnStartHost').click();
+        const bootMinimized = Boolean(info.launchedMinimized);
+        if ((bootMinimized || $('hostAutoStart').checked) && !hostRunning) {
+          log(bootMinimized ? '开机静默自启：正在后台开启被控服务...' : '检测到已勾选「启动时自动开启被控服务」，正在自动启动...');
+          await startHostService(bootMinimized);
+        }
+        if (bootMinimized) {
+          await invoke('hide_to_tray').catch(() => {});
         }
       } catch (e) {
         $('engineDot').className = 'dot warn';
